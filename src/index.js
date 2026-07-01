@@ -14,11 +14,11 @@ const Scanner = require('./scanner');
 const ApiClient = require('./api-client');
 const notifier = require('./notifier');
 
-const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
-const CACHE_PATH = path.join(__dirname, '..', 'poll-cache.json');
-const LOG_DIR = path.join(__dirname, '..', 'logs');
-const PID_PATH = path.join(__dirname, '..', 'agent.pid');
-const LOCK_PATH = path.join(__dirname, '..', 'agent.lock');
+const CONFIG_PATH = path.join(process.cwd(), 'config.json');
+const CACHE_PATH = path.join(process.cwd(), 'poll-cache.json');
+const LOG_DIR = path.join(process.cwd(), 'logs');
+const PID_PATH = path.join(process.cwd(), 'agent.pid');
+const LOCK_PATH = path.join(process.cwd(), 'agent.lock');
 
 function log(...args) {
   const ts = new Date().toISOString();

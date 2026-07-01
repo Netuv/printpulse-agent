@@ -18,8 +18,12 @@
 const path = require('path');
 const fs = require('fs');
 
-// Ensure we're running from agent root
-process.chdir(__dirname);
+// Ensure we're running from agent root (skip if bundled in pkg)
+try {
+  process.chdir(__dirname);
+} catch (err) {
+  // Ignore chdir errors in pkg-bundled executables
+}
 
 // Auto-detect first run - if no config exists, run setup wizard automatically
 const configPath = path.join(__dirname, 'config.json');
@@ -32,10 +36,10 @@ if (!fs.existsSync(configPath) && !['setup', 'help', '--help', '-h'].includes(cm
 
 // If it's a daemon/service/discover/poll command, use src/index.js
 if (['daemon', 'start', 'install', 'uninstall', 'status', 'discover', 'poll'].includes(cmd)) {
-  require(path.join(__dirname, 'src', 'index.js'));
+  require('./src/index.js');
 } else if (['setup', 'test', '--help', '-h', 'help'].includes(cmd)) {
   // Use src/cli.js for CLI commands
-  require(path.join(__dirname, 'src', 'cli.js'));
+  require('./src/cli.js');
 } else {
   console.log(`\n  PrintPulse Agent v1.0.0\n`);
   console.log('  Commands:');

@@ -9,7 +9,7 @@ const ApiClient = require('./api-client');
 
 // Load configuration
 function loadConfig() {
-  const configPath = path.join(__dirname, 'config.json');
+  const configPath = path.join(process.cwd(), 'config.json');
   
   if (!fs.existsSync(configPath)) {
     console.error('❌ config.json not found!');
@@ -242,7 +242,7 @@ program
       log_level: 'info',
     };
 
-    fs.writeFileSync(path.join(__dirname, 'config.json'), JSON.stringify(config, null, 2));
+    fs.writeFileSync(path.join(process.cwd(), 'config.json'), JSON.stringify(config, null, 2));
 
     console.log('\n✅ config.json created successfully!\n');
     console.log('   API URL:', config.api_url);

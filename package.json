@@ -1,6 +1,6 @@
 {
   "name": "printpulse-agent",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "PrintPulse SNMP Agent - Network discovery and printer polling",
   "main": "index.js",
   "scripts": {
@@ -12,9 +12,9 @@
     "discover": "node index.js discover",
     "poll": "node index.js poll",
     "daemon": "node index.js daemon",
-    "build:win": "pkg src/index.js --targets node18-win-x64 --output dist/printpulse-agent.exe",
-    "build:mac": "pkg src/index.js --targets node18-macos-x64 --output dist/printpulse-agent-macos",
-    "build:linux": "pkg src/index.js --targets node18-linux-x64 --output dist/printpulse-agent-linux",
+    "build:win": "pkg index.js --targets node18-win-x64 --output dist/printpulse-agent.exe",
+    "build:mac": "pkg index.js --targets node18-macos-x64 --output dist/printpulse-agent-macos",
+    "build:linux": "pkg index.js --targets node18-linux-x64 --output dist/printpulse-agent-linux",
     "build": "npm run build:win && npm run build:mac && npm run build:linux"
   },
   "keywords": ["snmp", "printer", "network-discovery", "monitoring"],
