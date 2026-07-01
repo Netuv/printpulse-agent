@@ -16,12 +16,19 @@
  */
 
 const path = require('path');
+const fs = require('fs');
 
 // Ensure we're running from agent root
 process.chdir(__dirname);
 
-// Route to the right handler
-const cmd = process.argv[2] || 'help';
+// Auto-detect first run - if no config exists, run setup wizard automatically
+const configPath = path.join(__dirname, 'config.json');
+let cmd = process.argv[2] || 'help';
+
+if (!fs.existsSync(configPath) && !['setup', 'help', '--help', '-h'].includes(cmd)) {
+  console.log('\n⚠️  Configuration not found. Running setup wizard...\n');
+  cmd = 'setup';
+}
 
 // If it's a daemon/service/discover/poll command, use src/index.js
 if (['daemon', 'start', 'install', 'uninstall', 'status', 'discover', 'poll'].includes(cmd)) {
