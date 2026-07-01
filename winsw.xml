@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<service>
+  <id>PrintPulseAgent</id>
+  <name>PrintPulse Agent</name>
+  <description>SNMP polling agent for PrintPulse print fleet management</description>
+  <executable>C:\Program Files\nodejs\node.exe</executable>
+  <arguments>D:\NPM\Evolving AMCS\agent\src\index.js daemon</arguments>
+  <log mode="roll"></log>
+  <onfailure action="restart" delay="10 sec"/>
+  <delayedAutoStart>true</delayedAutoStart>
+</service>
