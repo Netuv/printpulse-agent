@@ -305,9 +305,9 @@ class PollerService {
     if (webData && webData.status === 'ok') {
       // Web scraping succeeded (anonymous or with creds)
       if (webData.toner && webData.toner.length > 0) {
-        // WEB IS THE PRIORITY SOURCE — it reads the printer's own web UI
-        // (real-time, per-vendor accurate). SNMP is only a fallback when
-        // the web UI needs login / has no consumables page.
+        // Web toner priority, BUT Layer-2-sourced toner is unreliable (may
+        // mis-parse a page as toner, e.g. Ricoh WIM artifact 75/25/50/75).
+        // Layer-2 toner only wins if it matches SNMP or SNMP has no toner.
         const snmpToner = snmpData && snmpData.toner ? snmpData.toner : [];
         const webTonerMap = {};
         webData.toner.forEach(t => { webTonerMap[t.warna] = t.level; });
@@ -316,10 +316,16 @@ class PollerService {
         const match = Object.keys(webTonerMap).every(c => 
           snmpTonerMap[c] !== undefined && Math.abs(snmpTonerMap[c] - webTonerMap[c]) <= 15
         );
-        result.toner = webData.toner;
-        result.toner_match_snmp = match;
-        result._dataSource = 'web_scraper';
-        console.log(`   ✅ Web scraper toner WINS (${match ? 'MATCH SNMP' : 'web-realtime'}): ${webData.toner.map(t => t.warna + '=' + t.level + '%').join(', ')}`);
+        const fromLayer2 = webData.toner_from_layer2 === true;
+        const webWins = !fromLayer2 || match || snmpToner.length === 0;
+        if (webWins) {
+          result.toner = webData.toner;
+          result.toner_match_snmp = match;
+          result._dataSource = 'web_scraper';
+          console.log(`   ✅ Web scraper toner WINS (${match ? 'MATCH SNMP' : 'web-realtime'}): ${webData.toner.map(t => t.warna + '=' + t.level + '%').join(', ')}`);
+        } else {
+          console.log(`   ⚠️ Web toner SKIPPED (Layer2 artifact, tidak match SNMP) — pertahankan SNMP: ${webData.toner.map(t => t.warna + '=' + t.level).join(', ')} vs SNMP ${snmpToner.map(t => t.warna + '=' + t.level).join(', ')}`);
+        }
       }
       if (webData.trays && webData.trays.length > 0) {
         result.paper_trays = webData.trays;
@@ -1169,7 +1175,13 @@ class PollerService {
       if (discovered) {
         // Fill gaps only — prefer richer data, never replace real known-path data
         if (!result.toner || result.toner.length === 0) {
-          if (discovered.toner && discovered.toner.length > 0) { result.toner = discovered.toner; gotAny = true; }
+          if (discovered.toner && discovered.toner.length > 0) {
+            result.toner = discovered.toner;
+            // Mark as Layer-2 sourced — NOT reliable enough to override SNMP
+            // estimation (Layer 2 may mis-parse a page as toner, e.g. Ricoh WIM).
+            result.toner_from_layer2 = true;
+            gotAny = true;
+          }
         }
         if (!result.trays || result.trays.length === 0) {
           if (discovered.trays && discovered.trays.length > 0) { result.trays = discovered.trays; gotAny = true; }
