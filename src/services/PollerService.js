@@ -37,6 +37,8 @@ class PollerService {
     this.offlineQueue = [];
     this.snmpy = SnmpyBridge.getShared();
     this.timeout = (config.get && config.get('snmp_timeout_ms')) || 5000;
+    // Reuse OEM yield table from snmpy-bridge (shared estimator)
+    this._yieldProfiles = SnmpyBridge.TONER_YIELDS || {};
   }
 
   start() {
@@ -538,6 +540,41 @@ class PollerService {
     // For synthetic toners: mark all as estimated so JS estimation engine fills real %
     // For prtMediumTable: real data but may need page-count refinement
     // estimateTonerLevels in snmpy-bridge will replace estimated ones
+
+    // ── Estimate non-original/unknown chips (-2) from page counts ──
+    // Non-original chips return level -2 (no digital %). Estimate from
+    // page counts ÷ yield, so worker/frontend gets a REAL number instead
+    // of a stale 0/100. Matches the UI-side estimator.
+    const hasUnknown = toner.some(t => t.level === -2);
+    if (hasUnknown && (bwVal > 0 || colorVal > 0)) {
+      const vendor = (idPhase.vendor || '').toLowerCase();
+      const model = (idPhase.model || '').toLowerCase();
+      const yields = this._yieldProfiles || {};
+      let profile = yields[vendor] || { black: 8000, color: 5000 };
+      for (const [key, val] of Object.entries(yields)) {
+        if (key.startsWith(vendor + ':') && model.includes(key.split(':')[1])) { profile = val; break; }
+      }
+      const colorCount = toner.filter(t => !['BLACK','K','BK','NEGRO'].includes((t.warna||'').toUpperCase())).length || 1;
+      const perColor = colorCount > 0 ? Math.round(colorVal / colorCount) : colorVal;
+      toner.forEach(t => {
+        if (t.level !== -2) return;
+        const isBlack = ['BLACK','K','BK','NEGRO'].includes((t.warna||'').toUpperCase());
+        let estPct = null, note = '';
+        if (isBlack && bwVal > 0 && profile.black > 0) {
+          estPct = Math.max(0, Math.min(100, Math.round(100 - (bwVal / profile.black) * 100)));
+          note = `Est. BW pages (${bwVal}/${profile.black})`;
+        } else if (!isBlack && perColor > 0 && profile.color > 0) {
+          estPct = Math.max(0, Math.min(100, Math.round(100 - (perColor / profile.color) * 100)));
+          note = `Est. color ÷${colorCount} (${perColor}/${profile.color})`;
+        }
+        if (estPct !== null) {
+          t.level = estPct;
+          t.level_sekarang = estPct;
+          t.estimated = true;
+          t.estimated_from = note;
+        }
+      });
+    }
     
     const waste = (supPhase.waste || []).map(w => ({
       description: w.desc || '',
