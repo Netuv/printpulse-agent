@@ -96,10 +96,15 @@ class PollerService {
 
     const syncPayload = { devices: [] };
 
-    // Parallel poll all devices — 4 devices in ~15s instead of ~60s
+    // Parallel poll all devices — with per-device timeout so one slow device
+    // (e.g. 60s snmpy timeout) can never block the whole sync cycle.
+    const DEVICE_TIMEOUT = 110000; // 110s — generous for full SNMP+web scrape
     const pollResults = await Promise.allSettled(devices.map(async (dev) => {
       try {
-        const data = await this.readPrinterComprehensive(dev);
+        const data = await Promise.race([
+          this.readPrinterComprehensive(dev),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('DEVICE_TIMEOUT')), DEVICE_TIMEOUT)),
+        ]);
         
         // ── Baseline management ──
         // initial_bw/initial_color = meter saat agent pertama diinstall (untuk hitung delta/pemakaian)
