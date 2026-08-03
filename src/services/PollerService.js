@@ -193,6 +193,13 @@ class PollerService {
     config.set('tracked_devices', commitDevices);
     devices = commitDevices;
 
+    // Update agent dashboard IMMEDIATELY with fresh poll data —
+    // don't wait for API sync (which may be slow/failed/queued).
+    // Sync still runs below and emits again on success.
+    if (devices.length > 0) {
+      ipcController.emitToUI('poller-data-updated', devices);
+    }
+
     if (syncPayload.devices.length > 0) {
       try {
         const res = await api.syncPolledData(syncPayload);
