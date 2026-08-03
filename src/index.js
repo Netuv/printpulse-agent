@@ -47,12 +47,22 @@ function loadConfig() {
 }
 
 async function runDiscovery(config, apiClient) {
-  log('🔍 Starting network discovery...');
+  log('🔍 Starting comprehensive network discovery...');
   const scanner = new Scanner(config);
   try {
     const result = await scanner.scan();
-    const printerCount = result.devices.filter(d => d.snmp_result).length;
-    log(`✅ Discovery: ${result.devices.length} devices, ${printerCount} printers`);
+    const printerCount = result.devices.length;
+    log(`✅ Discovery: ${result.total_active_hosts} hosts scanned, ${printerCount} printers found`);
+    
+    // Log rich data per device
+    result.devices.forEach(d => {
+      log(`   📠 ${d.ip} | ${d.vendor || '?'} ${d.model || '?'} | SN: ${d.serial || '?'} | Pages: ${d.total_pages || 0}`);
+      if (d.toner_levels?.length) {
+        d.toner_levels.forEach(t => log(`      Toner ${t.color}: ${t.percentage !== null ? t.percentage + '%' : '?'} [${t.status}]`));
+      }
+      if (d.critical_alerts > 0) log(`      ⚠️  ${d.critical_alerts} critical alert(s)`);
+    });
+    
     await apiClient.submitDiscovery(result);
     log('📤 Results submitted to API');
     return result;
@@ -74,18 +84,38 @@ async function runPollCycle(config, apiClient, poller) {
       try {
         const result = await poller.pollMachine(machine);
         const delta = (result.delta_bw || 0) + (result.delta_color || 0);
+        
         if (delta > 0) {
           await apiClient.submitReading(machine.id, result);
           log(`  ✓ ${machine.merk} ${machine.model} (${machine.ip_address}): +${result.delta_bw}B +${result.delta_color}C`);
         }
-        // Update toner levels
-        if (result.toner_levels) {
-          for (const [color, level] of Object.entries(result.toner_levels)) {
-            if (level !== null && level <= 25) {
-              notifier.alertLowToner(machine.merk, machine.model, machine.ip_address, color, level);
-            }
+        
+        // Rich toner alerts from comprehensive scan
+        const tonerData = result.toner || result.toner_levels || [];
+        for (const t of tonerData) {
+          const level = t.level !== undefined ? t.level : t.percentage;
+          const color = t.warna || t.color || 'Unknown';
+          if (level !== null && level <= 25) {
+            notifier.alertLowToner(machine.merk, machine.model, machine.ip_address, color, level);
           }
         }
+        
+        // Waste toner alert
+        const wasteData = result.waste_toner || [];
+        for (const w of wasteData) {
+          if (w.percentage !== null && w.percentage > 85) {
+            notifier.alertWasteToner(machine.merk, machine.model, machine.ip_address, w.percentage);
+          }
+        }
+        
+        // Paper low alert
+        const paperData = result.paper_trays || [];
+        for (const p of paperData) {
+          if (p.percentage !== null && p.percentage < 10) {
+            log(`  ⚠️ Paper low: ${machine.ip_address} tray #${p.index} (${p.media || '?'}) = ${p.sheets || 0} sheets`);
+          }
+        }
+        
         success++;
       } catch (err) {
         log(`  ✗ ${machine.merk} ${machine.model} (${machine.ip_address}): ${err.message}`);

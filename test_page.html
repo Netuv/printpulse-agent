@@ -1,0 +1,30 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Frameset//EN">
+<HTML>
+<HEAD>
+<TITLE>FAILED</TITLE>
+<META http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<SCRIPT language="JavaScript1.2"><!--
+var lBk='Back';
+function wrBtn() {document.write('<TABLE border="0" width="100%" cellspaing="10" cellpadding="0">');
+document.writeln('<TR><TD align="center"><SMALL><INPUT type="button" value="', lBk, '" onClick="JavaScript:doSetting();"></SMALL></TD></TR></TABLE>');
+}
+function doSetting() {
+if (parent != self) {
+parent.window.location.href = 'stat.htm'
+} else {
+self.window.location.href = 'stat.htm'
+}
+}
+//--></SCRIPT>
+</HEAD>
+<BODY bgcolor="#D1D8E8" link="blue" vlink="blue" alink="blue">
+<P align="center">
+Login failed.
+<FORM>
+<SCRIPT language="JavaScript1.2"><!--
+document.cookie = "sid=0";
+wrBtn();
+//--></SCRIPT>
+</FORM>
+</BODY>
+</HTML>

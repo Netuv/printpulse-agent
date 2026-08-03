@@ -122,26 +122,83 @@ function renderDiscovered(devices) {
   }).join('');
 }
 
-// Track Device (called from HTML onclick)
+// Track Device (called from HTML onclick) — shows credential modal first
 window.trackDevice = async (ip, merk, model, sn) => {
-  try {
-    const btn = event.currentTarget;
-    btn.textContent = 'Syncing...';
-    btn.disabled = true;
+  // Check if this vendor typically needs web credentials
+  const needsCred = detectVendorNeedsCred(merk, model);
+  
+  if (needsCred) {
+    // Show credential modal
+    showCredentialModal(ip, merk, model, sn);
+  } else {
+    // Track without credentials
+    await doTrackDevice(ip, merk, model, sn, '', '', false);
+  }
+}
 
-    await ipcRenderer.invoke('track-device', { ip, merk_detected: merk, model_detected: model, snmp_result: { sysName: sn } });
+function detectVendorNeedsCred(merk, model) {
+  // Vendors that typically need HTTP Basic Auth for toner data
+  const credVendors = ['xerox', 'fuji', 'sharp', 'toshiba'];
+  const m = (merk || '').toLowerCase();
+  return credVendors.some(v => m.includes(v));
+}
+
+let _pendingTrack = null;
+
+function showCredentialModal(ip, merk, model, sn) {
+  _pendingTrack = { ip, merk, model, sn };
+  const modal = document.getElementById('cred-modal');
+  document.getElementById('cred-ip').textContent = ip;
+  document.getElementById('cred-merk').textContent = merk + ' ' + (model || '');
+  document.getElementById('cred-username').value = '';
+  document.getElementById('cred-password').value = '';
+  document.getElementById('cred-error').classList.add('hidden');
+  modal.classList.remove('hidden');
+}
+
+window.closeCredModal = () => {
+  document.getElementById('cred-modal').classList.add('hidden');
+  _pendingTrack = null;
+}
+
+window.submitCredModal = async () => {
+  if (!_pendingTrack) return;
+  const username = document.getElementById('cred-username').value;
+  const password = document.getElementById('cred-password').value;
+  document.getElementById('cred-modal').classList.add('hidden');
+  await doTrackDevice(_pendingTrack.ip, _pendingTrack.merk, _pendingTrack.model, _pendingTrack.sn, username, password, false);
+  _pendingTrack = null;
+}
+
+window.skipCredModal = async () => {
+  if (!_pendingTrack) return;
+  document.getElementById('cred-modal').classList.add('hidden');
+  await doTrackDevice(_pendingTrack.ip, _pendingTrack.merk, _pendingTrack.model, _pendingTrack.sn, '', '', false);
+  _pendingTrack = null;
+}
+
+async function doTrackDevice(ip, merk, model, sn, webUser, webPass, webSsl) {
+  try {
+    const btn = document.querySelector(`button[onclick*="'${ip}'"]`);
+    if (btn) { btn.textContent = 'Syncing...'; btn.disabled = true; }
+
+    await ipcRenderer.invoke('track-device', {
+      ip, merk_detected: merk, model_detected: model,
+      snmp_result: { sysName: sn },
+      web_username: webUser, web_password: webPass, web_ssl: webSsl
+    });
     
-    // Refresh config & UI
     config = await ipcRenderer.invoke('get-config');
     renderTracked();
     
-    btn.textContent = 'Tracked';
-    btn.className = 'bg-slate-100 text-slate-400 cursor-not-allowed px-3 py-1.5 rounded-lg text-sm font-medium transition-colors';
+    if (btn) {
+      btn.textContent = 'Tracked';
+      btn.className = 'bg-slate-100 text-slate-400 cursor-not-allowed px-3 py-1.5 rounded-lg text-sm font-medium transition-colors';
+    }
   } catch (err) {
-    alert('Gagal meregistrasi mesin: ' + (err.error || err.message || 'Unknown'));
-    const btn = event.currentTarget;
-    btn.textContent = 'Track Device';
-    btn.disabled = false;
+    alert('Gagal meregistrasi mesin: ' + (err.message || err.error || String(err)));
+    const btn = document.querySelector(`button[onclick*="'${ip}'"]`);
+    if (btn) { btn.textContent = 'Track Device'; btn.disabled = false; }
   }
 }
 
@@ -160,7 +217,7 @@ function renderTracked() {
     <tr class="hover:bg-slate-50 transition-colors">
       <td class="px-4 py-3 font-mono text-indigo-600">${d.ip}</td>
       <td class="px-4 py-3">
-        <div class="font-medium text-slate-800">${d.merk || 'Unknown'} ${d.model || ''}</div>
+        <div class="font-medium text-slate-800">${(d.last_data?.merk || d.merk || 'Unknown')} ${(d.last_data?.model || d.model || '')}</div>
         <div class="text-xs text-slate-500">ID Cloud: ${d.id}</div>
       </td>
       <td class="px-4 py-3 text-right">

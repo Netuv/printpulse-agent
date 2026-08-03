@@ -452,10 +452,10 @@ class PollerService {
       });
     });
 
-    // Post all — fire and forget
+    // Post all — fire and forget (system endpoint bypasses PIC view-only gate)
     for (const p of payloads) {
       try {
-        await api.createMesinActivity(dev.id, p);
+        await api.logDeviceActivity({ ...p, mesin_id: dev.id });
         console.log(`   [Alert→Activity] ${dev.ip}: ${p.deskripsi}`);
       } catch (err) {
         // Rate-limit: back off silently; next poll retries

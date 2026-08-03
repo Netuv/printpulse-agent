@@ -40,6 +40,33 @@ const app = {
     this.currentView = name;
   },
 
+  openModal(htmlContent) {
+    let container = document.getElementById('modal-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'modal-container';
+      document.body.appendChild(container);
+    }
+    container.innerHTML = htmlContent;
+    
+    // Add backdrop click to close
+    setTimeout(() => {
+      const backdrop = container.querySelector('[data-modal-backdrop]');
+      if (backdrop) {
+        backdrop.addEventListener('click', (e) => {
+          if (e.target === backdrop) this.closeModal();
+        });
+      }
+    }, 100);
+  },
+
+  closeModal() {
+    const container = document.getElementById('modal-container');
+    if (container) {
+      container.innerHTML = '';
+    }
+  },
+
   // Elegant Toast
   toast(msg, type = 'success') {
     const container = document.getElementById('toast-container');

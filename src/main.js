@@ -1,8 +1,12 @@
-const { app, BrowserWindow, Tray, Menu } = require('electron');
+const { app, BrowserWindow, Tray, Menu, dialog } = require('electron');
 const path = require('path');
 const config = require('./config');
 const ipcController = require('./controllers/ipcController');
 const PollerService = require('./services/PollerService');
+const PingerService = require('./services/PingerService');
+const realtime = require('./realtime');
+const SnmpyBridge = require('./snmpy-bridge');
+const { exec } = require('child_process');
 
 let tray = null;
 let mainWindow = null;
@@ -17,12 +21,26 @@ app.on('second-instance', () => {
   showWindow();
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   createTray();
-  
+
+  // Ensure Python + snmpy available or prompt installer on Windows
+  try {
+    await ensurePythonAndSnmpy();
+  } catch (e) {
+    // Continue even if check failed; poller will fallback to Node.js SNMP
+    console.warn('Python/snmpy check: ', e && e.message ? e.message : e);
+  }
+
   // Start Poller
   poller = new PollerService();
   poller.start();
+
+  // Start Pinger (parallel ping every 15s)
+  PingerService.start(ipcController, require('./api'));
+
+  // Start Realtime WS
+  realtime.connect();
 
   // Register all IPC events
   ipcController.register(poller);
@@ -44,6 +62,8 @@ app.whenReady().then(() => {
   });
 });
 
+// Silence is golden — snmpy check deferred to SnmpyBridge singleton
+
 function createTray() {
   const iconPath = path.join(__dirname, '..', 'assets', 'icon.png');
   try { tray = new Tray(iconPath); } 
@@ -52,7 +72,7 @@ function createTray() {
   const loginItemSettings = app.getLoginItemSettings();
   
   const contextMenu = Menu.buildFromTemplate([
-    { label: 'PrintPulse Agent v3', enabled: false },
+    { label: 'PrintPulse Agent v3.0.0', enabled: false },
     { type: 'separator' },
     { label: 'Buka Dashboard', click: () => showWindow() },
     {
@@ -77,7 +97,7 @@ function createTray() {
     }
   ]);
 
-  tray.setToolTip('PrintPulse Agent v3 - Running');
+  tray.setToolTip('PrintPulse Agent v3.0.0 - Running');
   tray.setContextMenu(contextMenu);
   
   // Windows fix: explicitly bind double-click and click

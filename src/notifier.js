@@ -29,6 +29,13 @@ function alertLowToner(merk, model, ip, color, level) {
   );
 }
 
+function alertWasteToner(merk, model, ip, percentage) {
+  send(
+    `🗑️ Waste Toner Full: ${merk} ${model}`,
+    `Waste toner: ${percentage}% — Needs cleaning! IP: ${ip}`
+  );
+}
+
 function alertMaintenanceDue(merk, model, ip, desc) {
   send(
     `🔧 Maintenance: ${merk} ${model}`,
@@ -47,4 +54,4 @@ function alertError(message) {
   send('❌ PrintPulse Agent Error', message);
 }
 
-module.exports = { send, alertLowToner, alertMaintenanceDue, alertConnectionLost, alertError };
+module.exports = { send, alertLowToner, alertWasteToner, alertMaintenanceDue, alertConnectionLost, alertError };

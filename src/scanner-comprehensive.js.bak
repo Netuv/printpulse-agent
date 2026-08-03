@@ -1,0 +1,2149 @@
+/**
+ * scanner-comprehensive.js — Comprehensive SNMP Printer Scanner
+ * =============================================================
+ * Monitors MFP (Multi-Function Printer) via SNMP protocol
+ * 
+ * Features:
+ *   ✅ Device info (model, serial, firmware, location)
+ *   ✅ Total page counters (lifetime, BW/Color split)
+ *   ✅ Toner levels (%, waste toner)
+ *   ✅ Paper trays (media name, remaining sheets)
+ *   ✅ Alert & error log
+ *   ✅ Active jobs
+ *   ✅ Vendor-specific data (Canon, Brother, Ricoh, HP, Epson, Kyocera, etc.)
+ * 
+ * Strategy:
+ *   1. snmpy (Python GETBULK) — fastest, preferred
+ *   2. net-snmp walk (Node.js) — fallback
+ *   3. Manual GETNEXT walk — last resort
+ * 
+ * Based on RFC 3805 (Printer MIB v2) and vendor private MIBs
+ * 
+ * @version 2.1.0
+ * @date 2026-07-06
+ */
+
+const os = require('os');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const snmp = require('net-snmp');
+const crypto = require('crypto');
+const SnmpyBridge = require('./snmpy-bridge');
+// Ensure snmpy resolves early (non-blocking)
+setTimeout(() => SnmpyBridge.getInstance(), 10);
+const OID_PROFILES = require('./oid-profiles');
+
+const execAsync = promisify(exec);
+
+// =====================================================================
+// STANDARD MIB OIDs (RFC 3805 / RFC 1759)
+// =====================================================================
+
+const BASE_PRINTER_MIB = '1.3.6.1.2.1.43';
+
+// Device Info
+const OID_DEVICE_MODEL = '1.3.6.1.2.1.43.5.1.1.16.1';
+const OID_DEVICE_SERIAL = '1.3.6.1.2.1.43.5.1.1.17.1';
+const OID_DEVICE_ID = '1.3.6.1.2.1.43.5.1.1.18.1';
+const OID_SYSNAME = '1.3.6.1.2.1.1.5.0';
+const OID_SYSLOCATION = '1.3.6.1.2.1.1.6.0';
+const OID_SYSDESCR = '1.3.6.1.2.1.1.1.0';
+const OID_SYSUPTIME = '1.3.6.1.2.1.1.3.0';
+const OID_SYSOBJECTID = '1.3.6.1.2.1.1.2.0';
+const OID_HOST_DEVICE_STATUS = '1.3.6.1.2.1.25.3.2.1.5.1';
+
+// Marker / Counters (TABLE — must walk)
+const OID_GENERAL = '1.3.6.1.2.1.43.5.1.1';
+const OID_MARKER_TABLE = '1.3.6.1.2.1.43.10.2';
+const OID_MARKER_INDEX = '1.3.6.1.2.1.43.10.2.1.1';
+const OID_MARKER_TECH = '1.3.6.1.2.1.43.10.2.1.2';
+const OID_MARKER_LIFE_COUNT = '1.3.6.1.2.1.43.10.2.1.4';
+const OID_MARKER_COUNTER_UNIT = '1.3.6.1.2.1.43.10.2.1.5';
+const OID_MARKER_COLORANT = '1.3.6.1.2.1.43.10.2.1.7';
+
+// Supplies (Toner, Waste Toner, Drum) — TABLE
+const OID_SUPPLIES_TABLE = '1.3.6.1.2.1.43.11.1.1';
+const OID_SUPPLY_DESC = '1.3.6.1.2.1.43.11.1.1.6';
+const OID_SUPPLY_TYPE = '1.3.6.1.2.1.43.11.1.1.2';
+const OID_SUPPLY_CLASS = '1.3.6.1.2.1.43.11.1.1.5';
+const OID_SUPPLY_LEVEL = '1.3.6.1.2.1.43.11.1.1.9';
+const OID_SUPPLY_MAX_CAP = '1.3.6.1.2.1.43.11.1.1.8';
+const OID_SUPPLY_UNIT = '1.3.6.1.2.1.43.11.1.1.7';
+
+// Input Trays (Paper) — TABLE
+const OID_INPUT_TABLE = '1.3.6.1.2.1.43.8.2.1';
+const OID_INPUT_INDEX = '1.3.6.1.2.1.43.8.2.1.1';
+const OID_INPUT_TYPE = '1.3.6.1.2.1.43.8.2.1.7';
+const OID_INPUT_MAX_CAP = '1.3.6.1.2.1.43.8.2.1.9';
+const OID_INPUT_CURRENT = '1.3.6.1.2.1.43.8.2.1.10';
+const OID_INPUT_WEIGHT = '1.3.6.1.2.1.43.8.2.1.14';
+const OID_INPUT_MEDIA_SIZE = '1.3.6.1.2.1.43.8.2.1.15';
+const OID_INPUT_MEDIA_NAME = '1.3.6.1.2.1.43.8.2.1.16';
+
+// Alerts — TABLE
+const OID_ALERT_TABLE = '1.3.6.1.2.1.43.18.1.1';
+const OID_ALERT_INDEX = '1.3.6.1.2.1.43.18.1.1.1';
+const OID_ALERT_CODE = '1.3.6.1.2.1.43.18.1.1.2';
+const OID_ALERT_SEVERITY = '1.3.6.1.2.1.43.18.1.1.4';
+const OID_ALERT_GROUP = '1.3.6.1.2.1.43.18.1.1.5';
+const OID_ALERT_TIME = '1.3.6.1.2.1.43.18.1.1.7';
+const OID_ALERT_TEXT = '1.3.6.1.2.1.43.18.1.1.8';
+
+// Jobs — TABLE
+const OID_JOB_TABLE = '1.3.6.1.2.1.43.6.2';
+const OID_JOB_ID = '1.3.6.1.2.1.43.6.2.1.2';
+const OID_JOB_NAME = '1.3.6.1.2.1.43.6.2.1.3';
+const OID_JOB_OWNER = '1.3.6.1.2.1.43.6.2.1.4';
+const OID_JOB_SIZE = '1.3.6.1.2.1.43.6.2.1.5';
+const OID_JOB_PAGES = '1.3.6.1.2.1.43.6.2.1.6';
+
+// Network
+const OID_MAC_ADDRESS = '1.3.6.1.2.1.2.2.1.6';
+const OID_IP_ADDRESS = '1.3.6.1.2.1.4.20.1.1';
+
+// =====================================================================
+// AMCS METER LABELS (from Template.htm — M1/M2/M3/M4 naming)
+// =====================================================================
+// Mesin BW: M1=Total Impressions, M2=Copy Service, M3=Print Service, M4=Fax Service
+// Mesin Color: M1=Color Impressions, M2=Black Impressions,
+//              M3=Color Large Impressions, M4=Total Impressions
+const AMCS_BW_LABELS  = ['M1:Total', 'M2:Copy', 'M3:Print', 'M4:Fax'];
+const AMCS_COLOR_LABELS = ['M1:Color', 'M2:Black', 'M3:ColorLarge', 'M4:Total'];
+
+// =====================================================================
+// VENDOR-SPECIFIC OIDs
+// =====================================================================
+
+const VENDOR_OIDS = {
+  canon: {
+    name: 'Canon', enterprise: '1.3.6.1.4.1.1602',
+    // AMCS GetSNMP3: 1.3.6.1.4.1.1602.1.11.1.4.1.4.101-104 (M1-M4)
+    m1: '1.3.6.1.4.1.1602.1.11.1.4.1.4.101',
+    m2: '1.3.6.1.4.1.1602.1.11.1.4.1.4.102',
+    m3: '1.3.6.1.4.1.1602.1.11.1.4.1.4.103',
+    m4: '1.3.6.1.4.1.1602.1.11.1.4.1.4.104',
+    // AMCS branch .1.11.1.4 — agent was using wrong branch .1.11.1.3
+    total: '1.3.6.1.4.1.1602.1.11.1.4.1.4.101',
+    color: '1.3.6.1.4.1.1602.1.11.1.4.1.4.106',
+    bw: '1.3.6.1.4.1.1602.1.11.1.4.1.4.102',
+    print_total: '1.3.6.1.4.1.1602.1.11.1.4.1.4.112',
+    copy_total: '1.3.6.1.4.1.1602.1.11.1.4.1.4.115',
+    scan_total: '1.3.6.1.4.1.1602.1.11.1.4.1.4.118',
+    fax_total: '1.3.6.1.4.1.1602.1.11.1.4.1.4.121',
+    print_bw: '1.3.6.1.4.1.1602.1.11.1.4.1.4.103',
+    print_color: '1.3.6.1.4.1.1602.1.11.1.4.1.4.105',
+    copy_bw: '1.3.6.1.4.1.1602.1.11.1.4.1.4.113',
+    copy_color: '1.3.6.1.4.1.1602.1.11.1.4.1.4.114',
+    toner_black:'1.3.6.1.2.1.43.11.1.1.9.1.1', toner_cyan:'1.3.6.1.2.1.43.11.1.1.9.1.2',
+    toner_magenta:'1.3.6.1.2.1.43.11.1.1.9.1.3', toner_yellow:'1.3.6.1.2.1.43.11.1.1.9.1.4',
+  },
+  brother: {
+    name: 'Brother', enterprise: '1.3.6.1.4.1.2435',
+    toner_black: '1.3.6.1.4.1.2435.2.3.9.1.1.2.10.1',
+    toner_cyan: '1.3.6.1.4.1.2435.2.3.9.1.1.2.10.2',
+    toner_magenta: '1.3.6.1.4.1.2435.2.3.9.1.1.2.10.3',
+    toner_yellow: '1.3.6.1.4.1.2435.2.3.9.1.1.2.10.4',
+    drum_black: '1.3.6.1.4.1.2435.2.3.9.1.1.2.11.1',
+    drum_cyan: '1.3.6.1.4.1.2435.2.3.9.1.1.2.11.2',
+    drum_magenta: '1.3.6.1.4.1.2435.2.3.9.1.1.2.11.3',
+    drum_yellow: '1.3.6.1.4.1.2435.2.3.9.1.1.2.11.4',
+    waste_toner: '1.3.6.1.4.1.2435.2.3.9.1.1.2.12.1',
+    jam_place: '1.3.6.1.4.1.2435.2.3.9.1.1.2.9',
+    device_id: '1.3.6.1.4.1.2435.2.3.9.1.1.7',
+  },
+  ricoh: {
+    name: 'Ricoh', enterprise: '1.3.6.1.4.1.367',
+    // AMCS GetSNMP7: M1-M4 from .367.3.2.1.2.19.[1-4].0
+    m1: '1.3.6.1.4.1.367.3.2.1.2.19.1.0',
+    m2: '1.3.6.1.4.1.367.3.2.1.2.19.2.0',
+    m3: '1.3.6.1.4.1.367.3.2.1.2.19.3.0',
+    m4: '1.3.6.1.4.1.367.3.2.1.2.19.4.0',
+    counter_base: '1.3.6.1.4.1.367.3.2.1.2.1.4.1',
+    supplies: '1.3.6.1.4.1.367.3.2.1.2.1.11',
+    waste: '1.3.6.1.4.1.367.3.2.1.2.1.7',
+    toner_black: '1.3.6.1.4.1.367.3.2.1.2.1.11.1.1.9.1',
+    toner_cyan: '1.3.6.1.4.1.367.3.2.1.2.1.11.1.1.9.2',
+    toner_magenta: '1.3.6.1.4.1.367.3.2.1.2.1.11.1.1.9.3',
+    toner_yellow: '1.3.6.1.4.1.367.3.2.1.2.1.11.1.1.9.4',
+    toner_max: '1.3.6.1.4.1.367.3.2.1.2.1.11.1.1.8',
+    toner_desc_1: '1.3.6.1.4.1.367.3.2.1.2.1.11.1.1.6.1',
+    toner_desc_2: '1.3.6.1.4.1.367.3.2.1.2.1.11.1.1.6.2',
+    toner_desc_3: '1.3.6.1.4.1.367.3.2.1.2.1.11.1.1.6.3',
+    toner_desc_4: '1.3.6.1.4.1.367.3.2.1.2.1.11.1.1.6.4',
+    counter_bw: '1.3.6.1.4.1.367.3.2.1.2.19.1.0',
+    counter_color: '1.3.6.1.4.1.367.3.2.1.2.19.2.0',
+    counter_total: '1.3.6.1.4.1.367.3.2.1.2.19.1.0',
+  },
+  epson: {
+    name: 'Epson', enterprise: '1.3.6.1.4.1.1248',
+    product_name: '1.3.6.1.4.1.1248.1.2.1.1.1.1',
+    serial: '1.3.6.1.4.1.1248.1.2.1.1.2.1',
+    total_pages: '1.3.6.1.4.1.1248.1.2.1.1.4.1.1',
+    toner_black:'1.3.6.1.4.1.124.10.100.1.3.1.1.0', toner_cyan:'1.3.6.1.4.1.124.10.100.1.3.1.1.1',
+    toner_magenta:'1.3.6.1.4.1.124.10.100.1.3.1.1.2', toner_yellow:'1.3.6.1.4.1.124.10.100.1.3.1.1.3',
+  },
+  kyocera: {
+    name: 'Kyocera', enterprise: '1.3.6.1.4.1.1347',
+    marker: '1.3.6.1.4.1.1347.43.10',
+    supplies: '1.3.6.1.4.1.1347.43.11',
+    alert: '1.3.6.1.4.1.1347.43.18',
+    job: '1.3.6.1.4.1.1347.43.24',
+    toner_black:'1.3.6.1.4.1.1347.42.2.1.1.1.6.1.1', toner_cyan:'1.3.6.1.4.1.1347.42.2.1.1.1.6.1.2',
+    toner_magenta:'1.3.6.1.4.1.1347.42.2.1.1.1.6.1.3', toner_yellow:'1.3.6.1.4.1.1347.42.2.1.1.1.6.1.4',
+  },
+  hp: {
+    name: 'HP', enterprise: '1.3.6.1.4.1.11',
+    // AMCS GetSNMP6: .11.2.3.9.4.2.1.4.1.2.6.0=BW, .7.0=Color
+    bw_counter: '1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.2.6.0',
+    color_counter: '1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.2.7.0',
+    toner_black:'1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.2.1.1',
+    toner_cyan:'1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.2.1.2',
+    toner_magenta:'1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.2.1.3',
+    toner_yellow:'1.3.6.1.4.1.11.2.3.9.4.2.1.4.1.2.1.4',
+  },
+  konicaminolta: {
+    name: 'Konica Minolta', enterprise: '1.3.6.1.4.1.18334',
+    device_info: '1.3.6.1.4.1.18334.1.1.1.1.1',
+    counter: '1.3.6.1.4.1.18334.1.1.1.2.1.1',
+    supplies: '1.3.6.1.4.1.18334.1.1.1.3.1.1',
+    toner_black:'1.3.6.1.4.1.18334.1.1.1.5.7.2.1.4.1.1', toner_cyan:'1.3.6.1.4.1.18334.1.1.1.5.7.2.1.4.1.2',
+    toner_magenta:'1.3.6.1.4.1.18334.1.1.1.5.7.2.1.4.1.3', toner_yellow:'1.3.6.1.4.1.18334.1.1.1.5.7.2.1.4.1.4',
+  },
+  sharp: {
+    name: 'Sharp', enterprise: '1.3.6.1.4.1.2383',
+    // AMCS GetSNMP4: .2385.1.1.19.2.1.3.5.4.61=M1, .63=M2
+    m1: '1.3.6.1.4.1.2385.1.1.19.2.1.3.5.4.61',
+    m2: '1.3.6.1.4.1.2385.1.1.19.2.1.3.5.4.63',
+    device_info: '1.3.6.1.4.1.2383.1.1.1.1.1',
+    counter: '1.3.6.1.4.1.2383.1.1.1.2.1',
+    supplies: '1.3.6.1.4.1.2383.1.1.1.3.1',
+    toner_black:'1.3.6.1.4.1.421.1.1.1.1.1.2.3.5.1.1', toner_cyan:'1.3.6.1.4.1.421.1.1.1.1.1.2.3.5.1.2',
+    toner_magenta:'1.3.6.1.4.1.421.1.1.1.1.1.2.3.5.1.3', toner_yellow:'1.3.6.1.4.1.421.1.1.1.1.1.2.3.5.1.4',
+  },
+  toshiba: {
+    name: 'Toshiba', enterprise: '1.3.6.1.4.1.5005',
+    device_info: '1.3.6.1.4.1.5005.1.1.1',
+    counter: '1.3.6.1.4.1.5005.1.1.2.1',
+    supplies: '1.3.6.1.4.1.5005.1.1.3.1',
+  },
+  xerox: {
+    name: 'Xerox', enterprise: '1.3.6.1.4.1.128',
+    // AMCS GetSNMP1: .253.8.53.13.2.1.6.101.20.1-4 (M1-M4 for WorkCentre/AltaLink)
+    m1: '1.3.6.1.4.1.253.8.53.13.2.1.6.101.20.1',
+    m2: '1.3.6.1.4.1.253.8.53.13.2.1.6.101.20.2',
+    m3: '1.3.6.1.4.1.253.8.53.13.2.1.6.101.20.3',
+    m4: '1.3.6.1.4.1.253.8.53.13.2.1.6.101.20.4',
+    device_info: '1.3.6.1.4.1.128.2.1.1.1.1',
+    counter: '1.3.6.1.4.1.128.2.1.1.1.18',
+    supplies: '1.3.6.1.4.1.128.2.1.1.1.16',
+    toner_black:'1.3.6.1.4.1.253.8.62.1.23.1.1.3.2.1', toner_cyan:'1.3.6.1.4.1.253.8.62.1.23.1.1.3.2.2',
+    toner_magenta:'1.3.6.1.4.1.253.8.62.1.23.1.1.3.2.3', toner_yellow:'1.3.6.1.4.1.253.8.62.1.23.1.1.3.2.4',
+  },
+};
+
+// =====================================================================
+// MAPPING / LOOKUP TABLES
+// =====================================================================
+
+const SUPPLY_TYPE_MAP = {
+  1: 'Other', 3: 'Toner', 4: 'WasteToner', 6: 'InkRibbon',
+  7: 'Opc/Drum', 8: 'Ink', 11: 'Fuser', 12: 'Staples', 13: 'WasteInk'
+};
+
+const SUPPLY_CLASS_MAP = {
+  3: 'Consumable',
+  4: 'Receptacle'
+};
+
+const SEVERITY_MAP = {
+  2: 'Warning',
+  3: 'Critical',
+  4: 'Info'
+};
+
+const MARK_TECH_MAP = {
+  3: 'Electrophotographic(Laser)',
+  4: 'Thermal',
+  5: 'Inkjet',
+  11: 'DotMatrix'
+};
+
+const INPUT_TYPE_MAP = {
+  2: 'SheetFeed',
+  4: 'ManualFeed',
+  5: 'Tray',
+  7: 'Envelope'
+};
+
+const HOST_STATUS_MAP = {
+  1: 'Running',
+  2: 'Warning',
+  3: 'Testing',
+  4: 'Down',
+  5: 'Unknown'
+};
+
+// Brother toner status codes
+const BROTHER_TONER_STATUS = {
+  0: 'Ready/Full',
+  1: 'Low',
+  2: 'No Cartridge',
+  3: 'Empty'
+};
+
+// Brother jam location codes
+const BROTHER_JAM_LOCATION = {
+  0: 'No Jam',
+  1: 'Tray',
+  2: 'Inside',
+  3: 'Rear',
+  4: 'Duplex'
+};
+
+// =====================================================================
+// COMPREHENSIVE SCANNER CLASS
+// =====================================================================
+
+class ComprehensiveScanner {
+  constructor(config) {
+    this.config = config || {};
+    this.snmpConfig = config.snmp || {};
+    this.community = this.snmpConfig.default_community || 'public';
+    this.timeout = this.snmpConfig.timeout_ms || 5000;
+    this.retries = this.snmpConfig.retry || 1;
+    // Share ONE snmpy bridge across all probes (caches Python detection)
+    this._snmpy = SnmpyBridge.getShared();
+  }
+
+  // ===================================================================
+  // MAIN SCAN ENTRY POINT
+  // ===================================================================
+
+  /**
+   * Main scan function — discovers and probes all printers on network
+   */
+  async scan() {
+    console.log('🔍 Step 1: Detecting local network...');
+    const networkInfo = this.detectNetwork();
+    console.log(`   Local IP: ${networkInfo.ip_local}`);
+    console.log(`   Gateway: ${networkInfo.gateway}`);
+    console.log(`   Subnet: ${networkInfo.subnet}`);
+
+    console.log('\n🔍 Step 2: Scanning network for active devices...');
+    const activeHosts = await this.pingSweep(networkInfo.subnet);
+    console.log(`   Active hosts: ${activeHosts.length}`);
+
+    console.log('\n🔍 Step 3: Probing devices for SNMP (Concurrent)...');
+    const devices = [];
+    
+    const probePromises = activeHosts.map(host => 
+      this.probeDeviceComprehensive(host).then(deviceInfo => {
+        if (deviceInfo) {
+          console.log(`   ✓ ${host} - ${deviceInfo.vendor || 'Unknown'} ${deviceInfo.model || ''}`);
+          return deviceInfo;
+        }
+        return null;
+      }).catch(() => null)
+    );
+
+    const results = await Promise.allSettled(probePromises);
+    results.forEach(res => {
+      if (res.status === 'fulfilled' && res.value) {
+        devices.push(res.value);
+      }
+    });
+
+    console.log(`\n✅ Scan complete: ${devices.length} printer(s) found`);
+
+    return {
+      scan_id: `scan_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+      scan_time: new Date().toISOString(),
+      network: networkInfo,
+      total_active_hosts: activeHosts.length,
+      total_printers: devices.length,
+      devices,
+      agent_version: '2.0.0',
+    };
+  }
+
+  // ===================================================================
+  // NETWORK DISCOVERY
+  // ===================================================================
+
+  /**
+   * Detect local network info
+   */
+  detectNetwork() {
+    const interfaces = os.networkInterfaces();
+    let localIP = null;
+    let gateway = null;
+
+    const virtualKeywords = ['tailscale', 'vethernet', 'virtual', 'vmware', 'wsl', 'loopback', 'pseudo'];
+
+    // Find first non-internal IPv4 interface that isn't a known virtual adapter
+    for (const name in interfaces) {
+      if (virtualKeywords.some(kw => name.toLowerCase().includes(kw))) {
+        continue;
+      }
+      for (const iface of interfaces[name]) {
+        if (iface.family === 'IPv4' && !iface.internal) {
+          localIP = iface.address;
+          const parts = localIP.split('.');
+          gateway = `${parts[0]}.${parts[1]}.${parts[2]}.1`;
+          break;
+        }
+      }
+      if (localIP) break;
+    }
+
+    // Fallback if all were virtual
+    if (!localIP) {
+      for (const name in interfaces) {
+        for (const iface of interfaces[name]) {
+          if (iface.family === 'IPv4' && !iface.internal) {
+            localIP = iface.address;
+            const parts = localIP.split('.');
+            gateway = `${parts[0]}.${parts[1]}.${parts[2]}.1`;
+            break;
+          }
+        }
+        if (localIP) break;
+      }
+    }
+
+    if (!localIP) {
+      throw new Error('Could not detect local network interface');
+    }
+
+    const subnet = localIP.substring(0, localIP.lastIndexOf('.'));
+
+    return {
+      ip_local: localIP,
+      gateway,
+      subnet: `${subnet}.0/24`,
+    };
+  }
+
+  /**
+   * Ping sweep to find active hosts
+   */
+  async pingSweep(subnet) {
+    const baseIP = subnet.split('/')[0].replace('.0', '');
+    const activeHosts = [];
+    const batchSize = 20;
+
+    for (let i = 1; i <= 254; i += batchSize) {
+      const batch = [];
+      for (let j = 0; j < batchSize && i + j <= 254; j++) {
+        const ip = `${baseIP}.${i + j}`;
+        batch.push(this.ping(ip));
+      }
+
+      const results = await Promise.allSettled(batch);
+      results.forEach((result, idx) => {
+        if (result.status === 'fulfilled' && result.value) {
+          activeHosts.push(`${baseIP}.${i + idx}`);
+        }
+      });
+    }
+
+    return activeHosts;
+  }
+
+  /**
+   * Ping a single host
+   */
+  async ping(host) {
+    const platform = os.platform();
+    const pingCmd = platform === 'win32'
+      ? `ping -n 1 -w 1000 ${host}`
+      : `ping -c 1 -W 1 ${host}`;
+
+    try {
+      await execAsync(pingCmd);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ===================================================================
+  // SNMP HELPER FUNCTIONS
+  // ===================================================================
+
+  /**
+   * Create SNMP session with timeout and retry
+   */
+  createSession(host, community = null) {
+    return snmp.createSession(host, community || this.community, {
+      timeout: this.timeout,
+      retries: this.retries,
+      version: snmp.Version2c,
+    });
+  }
+
+  /**
+   * SNMP GET — get single or multiple OIDs
+   */
+  snmpGet(session, oids) {
+    return new Promise((resolve, reject) => {
+      const oidArray = Array.isArray(oids) ? oids : [oids];
+      
+      session.get(oidArray, (error, varbinds) => {
+        if (error) {
+          return reject(error);
+        }
+
+        // Return raw varbinds (caller handles error checking)
+        resolve(varbinds);
+      });
+    });
+  }
+
+  /**
+   * SNMP WALK — walk entire subtree
+   */
+  snmpWalk(session, baseOid) {
+    return new Promise((resolve, reject) => {
+      const results = [];
+      
+      const walk = session.walk([baseOid], 100, (varbinds) => {
+        // Called for each batch of results
+        varbinds.forEach(vb => {
+          if (!snmp.isVarbindError(vb)) {
+            results.push({
+              oid: vb.oid.join('.'),
+              value: vb.value,
+              type: vb.type,
+            });
+          }
+        });
+      }, (error) => {
+        // Called when walk completes or errors
+        if (error) {
+          // Walk error is often just "end of MIB" which is OK
+          // Return what we got
+          resolve(results);
+        } else {
+          resolve(results);
+        }
+      });
+    });
+  }
+
+  /**
+   * SNMP WALK with timeout — safer version that always resolves
+   * FIXED: Falls back to manual GETNEXT walk if library walk fails
+   */
+  async snmpWalkSafe(session, baseOid, timeoutMs = 15000) {
+    // Try library walk first
+    try {
+      const results = await Promise.race([
+        this.snmpWalk(session, baseOid),
+        new Promise((resolve) => setTimeout(() => resolve('TIMEOUT'), timeoutMs))
+      ]);
+      
+      if (results !== 'TIMEOUT' && results.length > 0) {
+        return results;
+      }
+      
+      if (results === 'TIMEOUT') {
+        console.log(`   ⏱️  Walk timeout for ${baseOid}, trying manual GETNEXT walk...`);
+      } else {
+        console.log(`   ℹ️  Walk returned 0 results for ${baseOid}, trying manual GETNEXT walk...`);
+      }
+    } catch (error) {
+      console.log(`   ⚠️  Walk error: ${error.message}, trying manual GETNEXT walk...`);
+    }
+    
+    // Fallback: manual GETNEXT walk
+    return await this.manualWalk(session, baseOid, timeoutMs);
+  }
+
+  /**
+   * Manual SNMP walk using GETNEXT (fallback when library walk fails)
+   * Some printers (e.g. Ricoh) don't support standard walk operations
+   */
+  async manualWalk(session, baseOid, timeoutMs = 15000) {
+    const results = [];
+    let currentOid = baseOid;
+    const startTime = Date.now();
+    const seenOids = new Set();
+    
+    try {
+      while (Date.now() - startTime < timeoutMs && results.length < 500) {
+        const varbinds = await this.snmpGetNext(session, [currentOid]);
+        
+        if (!varbinds || varbinds.length === 0) break;
+        
+        const vb = varbinds[0];
+        
+        // Handle error values
+        if (!vb) break;
+        
+        // Check for end-of-MIB indicators
+        if (vb.value === null || vb.value === undefined) break;
+        
+        const nextOid = Array.isArray(vb.oid) ? vb.oid.join('.') : String(vb.oid);
+        
+        // Check if we've left the subtree
+        if (!nextOid.startsWith(baseOid)) break;
+        
+        // Check for loop (duplicate OID)
+        if (seenOids.has(nextOid)) break;
+        seenOids.add(nextOid);
+        
+        results.push({
+          oid: nextOid,
+          value: vb.value,
+          type: vb.type,
+        });
+        
+        currentOid = nextOid;
+      }
+    } catch (error) {
+      // Return what we got so far
+    }
+    
+    if (results.length > 0) {
+      console.log(`   📋 Manual walk got ${results.length} OIDs for ${baseOid}`);
+    }
+    return results;
+  }
+
+  /**
+   * SNMP GETNEXT — get next OID
+   */
+  snmpGetNext(session, oids) {
+    return new Promise((resolve, reject) => {
+      const oidArray = Array.isArray(oids) ? oids : [oids];
+      
+      session.getNext(oidArray, (error, varbinds) => {
+        if (error) return reject(error);
+        resolve(varbinds);
+      });
+    });
+  }
+
+  /**
+   * Group walk results by composite index key
+   * FIXED: Handles multi-level indices (e.g. Ricoh supplies have index.subindex)
+   * Strategy 1: Match against known column prefixes
+   * Strategy 2: Fallback to last-OID-segment grouping
+   */
+  groupTableByIndex(walkResults) {
+    // Strategy 1: Match against known column OIDs
+    const grouped = {};
+    
+    // Known printer MIB column OIDs (will match prefix)
+    const columnOids = new Set([
+      OID_SUPPLY_DESC, OID_SUPPLY_TYPE, OID_SUPPLY_CLASS,
+      OID_SUPPLY_LEVEL, OID_SUPPLY_MAX_CAP, OID_SUPPLY_UNIT,
+      OID_MARKER_INDEX, OID_MARKER_TECH, OID_MARKER_LIFE_COUNT,
+      OID_MARKER_COUNTER_UNIT, OID_MARKER_COLORANT,
+      OID_INPUT_INDEX, OID_INPUT_TYPE, OID_INPUT_MAX_CAP,
+      OID_INPUT_CURRENT, OID_INPUT_WEIGHT, OID_INPUT_MEDIA_SIZE, OID_INPUT_MEDIA_NAME,
+      OID_ALERT_INDEX, OID_ALERT_CODE, OID_ALERT_SEVERITY,
+      OID_ALERT_GROUP, OID_ALERT_TIME, OID_ALERT_TEXT,
+      OID_JOB_ID, OID_JOB_NAME, OID_JOB_OWNER, OID_JOB_SIZE, OID_JOB_PAGES,
+    ]);
+    
+    for (const item of walkResults) {
+      const oidStr = item.oid;
+      
+      // Find which column OID this belongs to
+      let matchedColumn = null;
+      let indexKey = null;
+      
+      for (const colOid of columnOids) {
+        if (oidStr.startsWith(colOid)) {
+          matchedColumn = colOid;
+          indexKey = oidStr.substring(colOid.length);
+          break;
+        }
+      }
+      
+      if (matchedColumn && indexKey && indexKey.length > 0) {
+        if (indexKey.startsWith('.')) indexKey = indexKey.substring(1);
+        
+        if (!grouped[indexKey]) {
+          grouped[indexKey] = {};
+        }
+        grouped[indexKey][matchedColumn] = this.parseValue(item.value, item.type);
+      }
+    }
+    
+    // If strategy 1 found nothing, fallback to last-segment grouping
+    if (Object.keys(grouped).length === 0 && walkResults.length > 0) {
+      for (const item of walkResults) {
+        const oidParts = item.oid.split('.');
+        if (oidParts.length < 2) continue;
+        const index = oidParts[oidParts.length - 1];
+        const baseOid = oidParts.slice(0, -1).join('.');
+        if (!grouped[index]) grouped[index] = {};
+        grouped[index][baseOid] = this.parseValue(item.value, item.type);
+      }
+    }
+    
+    return grouped;
+  }
+
+  /**
+   * Parse SNMP value based on type
+   */
+  parseValue(value, type) {
+    if (value === null || value === undefined) {
+      return null;
+    }
+
+    // Check for error values
+    if (typeof value === 'object' && value.constructor && value.constructor.name === 'NoSuchInstance') {
+      return null;
+    }
+
+    // OctetString
+    if (Buffer.isBuffer(value)) {
+      return value.toString('utf8').replace(/\0/g, '');
+    }
+
+    // Integer, Counter, Gauge, TimeTicks
+    if (typeof value === 'number') {
+      return value;
+    }
+
+    // OID
+    if (Array.isArray(value)) {
+      return value.join('.');
+    }
+
+    // Default: convert to string
+    return String(value);
+  }
+
+  /**
+   * Format uptime (timeticks) to human readable
+   */
+  formatUptime(timeticks) {
+    try {
+      const seconds = Math.floor(timeticks / 100);
+      const days = Math.floor(seconds / 86400);
+      const hours = Math.floor((seconds % 86400) / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const secs = seconds % 60;
+      return `${days}d ${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    } catch {
+      return String(timeticks);
+    }
+  }
+
+  /**
+   * Detect vendor from sysObjectID or sysDescr
+   */
+  detectVendor(sysObjectID, sysDescr) {
+    const oid = sysObjectID || '';
+    const descr = (sysDescr || '').toUpperCase();
+
+    // Check enterprise OID prefixes
+    const oidPrefixes = {
+      '1.3.6.1.4.1.1602': 'Canon',
+      '1.3.6.1.4.1.2435': 'Brother',
+      '1.3.6.1.4.1.367': 'Ricoh',
+      '1.3.6.1.4.1.1248': 'Epson',
+      '1.3.6.1.4.1.1347': 'Kyocera',
+      '1.3.6.1.4.1.11': 'HP',
+      '1.3.6.1.4.1.18334': 'Konica Minolta',
+      '1.3.6.1.4.1.2383': 'Sharp',
+      '1.3.6.1.4.1.5005': 'Toshiba',
+      '1.3.6.1.4.1.128': 'Xerox',
+      '1.3.6.1.4.1.641': 'Lexmark',
+      '1.3.6.1.4.1.236': 'Samsung',
+    };
+
+    for (const [prefix, vendor] of Object.entries(oidPrefixes)) {
+      if (oid.startsWith(prefix)) {
+        return vendor.toLowerCase().replace(/\s+/g, '');
+      }
+    }
+
+    // Fallback: detect from description
+    if (descr.includes('CANON')) return 'canon';
+    if (descr.includes('BROTHER')) return 'brother';
+    if (descr.includes('RICOH')) return 'ricoh';
+    if (descr.includes('EPSON')) return 'epson';
+    if (descr.includes('KYOCERA')) return 'kyocera';
+    if (descr.includes('HP') || descr.includes('HEWLETT')) return 'hp';
+    if (descr.includes('KONICA') || descr.includes('MINOLTA')) return 'konicaminolta';
+    if (descr.includes('SHARP')) return 'sharp';
+    if (descr.includes('TOSHIBA')) return 'toshiba';
+    if (descr.includes('XEROX') || descr.includes('FUJI XEROX')) return 'xerox';
+    if (descr.includes('LEXMARK')) return 'lexmark';
+    if (descr.includes('SAMSUNG')) return 'samsung';
+
+    return 'unknown';
+  }
+
+  /**
+   * Detect model name from sysDescr
+   */
+  detectModel(sysDescr) {
+    if (!sysDescr) return null;
+    
+    // Extract model pattern (alphanumeric with optional dashes)
+    const match = sysDescr.match(/\b([A-Z]+[\d]+[A-Za-z\d\-]*)\b/);
+    return match ? match[1] : null;
+  }
+
+  /**
+   * Check if device is a printer based on sysDescr and vendor
+   */
+  isPrinter(sysDescr) {
+    if (!sysDescr) return false;
+    const upper = sysDescr.toUpperCase();
+    
+    // Positive match: printer/copier/MFP keywords
+    const printerKeywords = /(PRINTER|MFP|MFC|M[CF]P|COPIER|XEROX|LASERJET|PAGEWIDE|OFFICEJET|WORKFORCE|IMAGERUNNER|TASKALFA|ECOSYS|BIZHUB|MULTIFUNCTION|DIGITAL\s+COPIER)\b/i;
+    if (printerKeywords.test(upper)) return true;
+    
+    // Negative match: definitely not a printer
+    const nonPrinterKeywords = /(SWITCH|ROUTER|ACCESS\s+POINT|FIREWALL|GATEWAY|APC\s+|UPS\s+|SERVER\s+|NVR|DVR|\bIP\s+PHONE|POWER\s+OVER\s+ETHERNET|TELNET|SSH\s+|RACK\s+PDU|\bPDU\b)/i;
+    if (nonPrinterKeywords.test(upper)) return false;
+    
+    // Check for SNMPv3-only clues: printer-related OIDs
+    // If it has printer MIB entries, it's a printer
+    return false; // Unknown — let Node.js probe decide (snmpy already returned if available)
+  }
+
+  // ===================================================================
+  // DATA COLLECTION METHODS
+  // ===================================================================
+
+  /**
+   * Collect basic device information
+   * IMPROVED: More robust parsing, handles partial failures
+   */
+  async collectDeviceInfo(session) {
+    const info = {};
+    
+    try {
+      // Get basic system info
+      const basicOids = [
+        OID_DEVICE_MODEL,
+        OID_DEVICE_SERIAL,
+        OID_DEVICE_ID,
+        OID_SYSNAME,
+        OID_SYSLOCATION,
+        OID_SYSDESCR,
+        OID_SYSUPTIME,
+        OID_SYSOBJECTID,
+        OID_HOST_DEVICE_STATUS,
+      ];
+      
+      const varbinds = await this.snmpGet(session, basicOids);
+      
+      // Parse each value with error handling
+      varbinds.forEach((vb, idx) => {
+        if (!snmp.isVarbindError(vb)) {
+          const val = this.parseValue(vb.value, vb.type);
+          const keys = ['model', 'serial', 'device_id', 'hostname', 'location', 
+                        'sys_descr', 'uptime_raw', 'sys_object_id', 'host_status_raw'];
+          if (idx < keys.length && val !== null) {
+            info[keys[idx]] = val;
+          }
+        }
+      });
+      
+      // Detect vendor from sysObjectID or sysDescr
+      info.vendor = this.detectVendor(info.sys_object_id, info.sys_descr);
+      
+      // Format uptime
+      if (info.uptime_raw) {
+        info.uptime_human = this.formatUptime(info.uptime_raw);
+      }
+      
+      // Map host status
+      info.host_status = HOST_STATUS_MAP[info.host_status_raw] || (info.host_status_raw !== undefined ? `Unknown(${info.host_status_raw})` : null);
+      
+    } catch (error) {
+      console.error(`   ⚠️  Device info collection error: ${error.message}`);
+    }
+    
+    return info;
+  }
+
+  /**
+   * Collect page counters from marker table
+   * IMPROVED: Better fallback, direct OID attempts
+   */
+  async collectCounters(session) {
+    const counters = [];
+    
+    try {
+      const walkResults = await this.snmpWalkSafe(session, OID_MARKER_TABLE, 10000);
+      
+      if (walkResults.length === 0) {
+        console.log(`   ℹ️  No counter data from marker table walk, trying direct OIDs...`);
+        
+        // Try direct counter OIDs as fallback
+        const directOids = [
+          '1.3.6.1.2.1.43.10.2.1.4.1.1', // BW counter
+          '1.3.6.1.2.1.43.10.2.1.4.1.2', // Color counter
+          '1.3.6.1.2.1.43.10.2.1.7.1.1', // Colorant 1
+          '1.3.6.1.2.1.43.10.2.1.7.1.2', // Colorant 2
+        ];
+        
+        try {
+          const directBinds = await this.snmpGet(session, directOids);
+          if (directBinds && directBinds.length > 0) {
+            const count1 = this.parseValue(directBinds[0]?.value, directBinds[0]?.type);
+            const count2 = this.parseValue(directBinds[1]?.value, directBinds[1]?.type);
+            const colorant1 = this.parseValue(directBinds[2]?.value, directBinds[2]?.type);
+            const colorant2 = this.parseValue(directBinds[3]?.value, directBinds[3]?.type);
+            
+            if (count1 && !snmp.isVarbindError(directBinds[0])) {
+              counters.push({
+                index: 1,
+                life_count: count1,
+                tech: 3, // Assume laser
+                tech_name: 'Electrophotographic(Laser)',
+                counter_unit: 7,
+                colorant: colorant1 || 'black',
+              });
+            }
+            
+            if (count2 && !snmp.isVarbindError(directBinds[1]) && count2 > 0) {
+              counters.push({
+                index: 2,
+                life_count: count2,
+                tech: 3,
+                tech_name: 'Electrophotographic(Laser)',
+                counter_unit: 7,
+                colorant: colorant2 || 'color',
+              });
+            }
+            
+            if (counters.length > 0) {
+              console.log(`   ✓ Direct counter read: ${counters.length} marker(s)`);
+            }
+          }
+        } catch (directErr) {
+          console.log(`   ⚠️  Direct counter read failed: ${directErr.message}`);
+        }
+        
+        return counters;
+      }
+      
+      const grouped = this.groupTableByIndex(walkResults);
+      
+      for (const [index, row] of Object.entries(grouped)) {
+        const lifeCount = row[OID_MARKER_LIFE_COUNT] || row['1.3.6.1.2.1.43.10.2.1.4'] || 0;
+        const tech = row[OID_MARKER_TECH] || row['1.3.6.1.2.1.43.10.2.1.2'] || null;
+        const colorant = row[OID_MARKER_COLORANT] || row['1.3.6.1.2.1.43.10.2.1.7'] || null;
+        
+        const marker = {
+          index: parseInt(index),
+          life_count: lifeCount,
+          tech: tech,
+          tech_name: MARK_TECH_MAP[tech] || 'Unknown',
+          counter_unit: row[OID_MARKER_COUNTER_UNIT] || row['1.3.6.1.2.1.43.10.2.1.5'] || 7,
+          colorant: colorant,
+        };
+        
+        counters.push(marker);
+      }
+      
+    } catch (error) {
+      console.error(`   ⚠️  Counter collection error: ${error.message}`);
+    }
+    
+    return counters;
+  }
+
+  /**
+   * Collect supplies (toner, waste toner, drum, etc.)
+   * IMPROVED: Longer timeout, better error handling, fallback strategies
+   * FIXED: Direct GET fallback when walk fails (Ricoh compatibility)
+   */
+  async collectSupplies(session) {
+    const supplies = {
+      toners: [],
+      waste: [],
+      drums: [],
+      others: [],
+    };
+    
+    // Strategy 1: Try walk (works for most printers)
+    try {
+      const walkResults = await this.snmpWalkSafe(session, OID_SUPPLIES_TABLE, 15000);
+      
+      if (walkResults.length > 0) {
+        return this.parseSuppliesFromWalk(walkResults);
+      }
+      
+      // Try alternative walk OID
+      console.log(`   ℹ️  No supplies from standard walk, trying alternative...`);
+      const altResults = await this.snmpWalkSafe(session, '1.3.6.1.2.1.43.11.1', 10000);
+      if (altResults.length > 0) {
+        console.log(`   ✓ Alternative walk got ${altResults.length} OIDs`);
+        return this.parseSuppliesFromWalk(altResults);
+      }
+    } catch (error) {
+      console.log(`   ⚠️  Walk failed (${error.message}), trying direct GET...`);
+    }
+    
+    // Strategy 2: Direct GET for specific OIDs (Ricoh-compatible)
+    console.log(`   Trying direct GET for supplies...`);
+    return await this.collectSuppliesDirect(session);
+  }
+
+  /**
+   * Collect supplies via direct GET (fallback when walk fails)
+   * Tries standard and vendor OIDs directly
+   */
+  async collectSuppliesDirect(session) {
+    const supplies = { toners: [], waste: [], drums: [], others: [] };
+    
+    try {
+      // Try standard supply OIDs (up to 10 entries)
+      const descriptions = [];
+      const levels = [];
+      const maxCaps = [];
+      
+      // Fetch descriptions, levels, and max capacities for indexes 1-10
+      const descOids = [];
+      const levelOids = [];
+      const maxOids = [];
+      
+      for (let i = 1; i <= 10; i++) {
+        descOids.push(`1.3.6.1.2.1.43.11.1.1.6.1.${i}`);
+        levelOids.push(`1.3.6.1.2.1.43.11.1.1.9.1.${i}`);
+        maxOids.push(`1.3.6.1.2.1.43.11.1.1.8.1.${i}`);
+      }
+      
+      const [descBinds, levelBinds, maxBinds] = await Promise.all([
+        this.snmpGet(session, descOids),
+        this.snmpGet(session, levelOids),
+        this.snmpGet(session, maxOids),
+      ]);
+      
+      for (let i = 0; i < 10; i++) {
+        const desc = this.parseValue(descBinds[i]?.value, descBinds[i]?.type);
+        if (!desc || snmp.isVarbindError(descBinds[i])) continue;
+        
+        const level = this.parseValue(levelBinds[i]?.value, levelBinds[i]?.type);
+        const maxCap = this.parseValue(maxBinds[i]?.value, maxBinds[i]?.type);
+        
+        // Detect type from description
+        let supType = 3; // Default: Toner
+        let supClass = 3; // Default: Consumable
+        
+        const descUpper = desc.toUpperCase();
+        if (descUpper.includes('WASTE')) {
+          supType = 4;
+          supClass = 4;
+        } else if (descUpper.includes('DRUM') || descUpper.includes('OPC')) {
+          supType = 7;
+          supClass = 3;
+        } else if (descUpper.includes('INK')) {
+          supType = 8;
+          supClass = 3;
+        } else if (descUpper.includes('FUSER')) {
+          supType = 11;
+          supClass = 3;
+        }
+        
+        // Calculate percentage
+        let percentage = null;
+        if (level !== null && level >= 0 && maxCap > 0) {
+          if (maxCap === 1) {
+            percentage = level * 100;
+          } else if (maxCap <= 100) {
+            percentage = Math.round(level);
+          } else if (level > 1) {
+            percentage = Math.round((level / maxCap) * 100);
+          }
+          if (percentage !== null) {
+            percentage = Math.max(0, Math.min(100, percentage));
+          }
+        }
+        
+        const supplyItem = {
+          index: i + 1,
+          description: desc,
+          type: SUPPLY_TYPE_MAP[supType] || `Unknown(${supType})`,
+          type_code: supType,
+          class: SUPPLY_CLASS_MAP[supClass] || `Unknown(${supClass})`,
+          class_code: supClass,
+          level_raw: level,
+          max_capacity_raw: maxCap,
+          percentage: percentage,
+          unit: null,
+        };
+        
+        // Categorize
+        if (supClass === 4) {
+          supplies.waste.push(supplyItem);
+        } else if (supType === 3 || supType === 8) {
+          supplies.toners.push(supplyItem);
+        } else if (supType === 7) {
+          supplies.drums.push(supplyItem);
+        } else {
+          supplies.others.push(supplyItem);
+        }
+      }
+      
+      console.log(`   ✓ Direct GET: ${supplies.toners.length} toner(s), ${supplies.waste.length} waste`);
+      
+    } catch (error) {
+      console.log(`   ⚠️  Direct GET supplies error: ${error.message}`);
+    }
+    
+    return supplies;
+  }
+
+  /**
+   * Parse supplies from walk results
+   * Extracted to separate method for reusability
+   * FIXED: Debug logging + direct column matching
+   */
+  parseSuppliesFromWalk(walkResults) {
+    const supplies = {
+      toners: [],
+      waste: [],
+      drums: [],
+      others: [],
+    };
+    
+    // Log first few OIDs to debug
+    if (walkResults.length > 0) {
+      console.log(`   📋 Parsing ${walkResults.length} supplies OIDs...`);
+      console.log(`   Sample: ${walkResults.slice(0, 3).map(r => r.oid + '=' + r.value).join(', ')}`);
+    }
+    
+    const grouped = this.groupTableByIndex(walkResults);
+    const idxCount = Object.keys(grouped).length;
+    console.log(`   📊 Grouped into ${idxCount} supply entries`);
+    
+    for (const [index, row] of Object.entries(grouped)) {
+      // Try multiple OID formats
+      const desc = row[OID_SUPPLY_DESC] || row['1.3.6.1.2.1.43.11.1.1.6'] || 
+                   row['.1.3.6.1.2.1.43.11.1.1.6'] || 'Unknown';
+      const supType = row[OID_SUPPLY_TYPE] || row['1.3.6.1.2.1.43.11.1.1.2'] || 1;
+      const supClass = row[OID_SUPPLY_CLASS] || row['1.3.6.1.2.1.43.11.1.1.5'] || 0;
+      const level = row[OID_SUPPLY_LEVEL] !== undefined ? row[OID_SUPPLY_LEVEL] : 
+                    row['1.3.6.1.2.1.43.11.1.1.9'];
+      const maxCap = row[OID_SUPPLY_MAX_CAP] !== undefined ? row[OID_SUPPLY_MAX_CAP] : 
+                     row['1.3.6.1.2.1.43.11.1.1.8'];
+      const unit = row[OID_SUPPLY_UNIT] || row['1.3.6.1.2.1.43.11.1.1.7'] || null;
+      
+      // Debug: show raw row
+      if (idxCount <= 10) {
+        console.log(`   Entry ${index}: desc=${desc}, type=${supType}, class=${supClass}, level=${level}, max=${maxCap}`);
+      }
+      
+      // Skip if no meaningful data
+      if (!desc || desc === 'Unknown') {
+        continue;
+      }
+      
+      // Calculate percentage with better handling
+      let percentage = null;
+      if (level !== null && level !== undefined && maxCap !== null && maxCap !== undefined) {
+        if (level < 0) {
+          // -2=unknown, -3=some remaining, others
+          percentage = null;
+        } else if (maxCap === 1) {
+          percentage = level * 100;
+        } else if (maxCap <= 100) {
+          // Already in percentage units
+          percentage = Math.round(level);
+        } else if (maxCap > 100 && level > 1) {
+          percentage = Math.round((level / maxCap) * 100);
+        }
+        if (percentage !== null) percentage = Math.max(0, Math.min(100, percentage));
+      }
+      
+      // Determine type from description if type_code is ambiguous
+      let typeCode = supType;
+      let classCode = supClass;
+      const descUpper = (desc || '').toUpperCase();
+      
+      if (typeCode === 1 || typeCode === 0) {
+        if (descUpper.includes('WASTE') || descUpper.includes('Waste')) {
+          typeCode = 4; classCode = 4;
+        } else if (descUpper.includes('DRUM') || descUpper.includes('OPC') || descUpper.includes('Drum')) {
+          typeCode = 7;
+        } else if (descUpper.includes('INK') || descUpper.includes('Ink')) {
+          typeCode = 8;
+        } else if (descUpper.includes('TONER') || descUpper.includes('Toner')) {
+          typeCode = 3;
+        }
+      }
+      
+      const supplyItem = {
+        index: parseInt(index) || 0,
+        description: desc,
+        type: SUPPLY_TYPE_MAP[typeCode] || `Unknown(${typeCode})`,
+        type_code: typeCode,
+        class: SUPPLY_CLASS_MAP[classCode] || `Unknown(${classCode})`,
+        class_code: classCode,
+        level_raw: level,
+        max_capacity_raw: maxCap,
+        percentage: percentage,
+        unit: unit,
+      };
+      
+      // Categorize
+      if (classCode === 4) {
+        supplies.waste.push(supplyItem);
+      } else if (typeCode === 3 || typeCode === 8) {
+        supplies.toners.push(supplyItem);
+      } else if (typeCode === 7) {
+        supplies.drums.push(supplyItem);
+      } else if (descUpper.includes('TONER') || descUpper.includes('Toner')) {
+        supplies.toners.push(supplyItem);
+      } else {
+        supplies.others.push(supplyItem);
+      }
+    }
+    
+    return supplies;
+  }
+
+  /**
+   * Collect input trays (paper)
+   */
+  async collectInputTrays(session) {
+    const trays = [];
+    
+    try {
+      const walkResults = await this.snmpWalkSafe(session, OID_INPUT_TABLE, 8000);
+      
+      if (walkResults.length === 0) {
+        return trays;
+      }
+      
+      const grouped = this.groupTableByIndex(walkResults);
+      
+      for (const [index, row] of Object.entries(grouped)) {
+        const inputType = row[OID_INPUT_TYPE] || 0;
+        const maxCap = row[OID_INPUT_MAX_CAP];
+        const current = row[OID_INPUT_CURRENT];
+        const mediaName = row[OID_INPUT_MEDIA_NAME];
+        const mediaSize = row[OID_INPUT_MEDIA_SIZE];
+        const mediaWeight = row[OID_INPUT_WEIGHT];
+        
+        // Calculate percentage
+        let percentage = null;
+        if (current !== null && current !== undefined && maxCap > 0 && current >= -1) {
+          if (current === -2 || current === -3) {
+            percentage = null;
+          } else {
+            percentage = Math.round((current / maxCap) * 100);
+          }
+        }
+        
+        const tray = {
+          index: parseInt(index),
+          type: INPUT_TYPE_MAP[inputType] || `Unknown(${inputType})`,
+          type_code: inputType,
+          max_capacity: maxCap,
+          current_level: current,
+          percentage: percentage,
+          media_name: mediaName || null,
+          media_size: mediaSize || null,
+          media_weight: mediaWeight || null,
+        };
+        
+        trays.push(tray);
+      }
+      
+    } catch (error) {
+      console.error(`   ⚠️  Input tray collection error: ${error.message}`);
+    }
+    
+    return trays;
+  }
+
+  /**
+   * Collect alerts/errors
+   */
+  async collectAlerts(session) {
+    const alerts = [];
+    
+    try {
+      const walkResults = await this.snmpWalkSafe(session, OID_ALERT_TABLE, 5000);
+      
+      if (walkResults.length === 0) {
+        return alerts;
+      }
+      
+      const grouped = this.groupTableByIndex(walkResults);
+      
+      for (const [index, row] of Object.entries(grouped)) {
+        const code = row[OID_ALERT_CODE];
+        const severity = row[OID_ALERT_SEVERITY] || 0;
+        const group = row[OID_ALERT_GROUP];
+        const time = row[OID_ALERT_TIME];
+        const text = row[OID_ALERT_TEXT] || '';
+        
+        const alert = {
+          index: parseInt(index),
+          code: code,
+          severity: SEVERITY_MAP[severity] || `Unknown(${severity})`,
+          severity_code: severity,
+          group: group,
+          time: time,
+          text: text,
+        };
+        
+        alerts.push(alert);
+      }
+      
+    } catch (error) {
+      // Alerts not critical, don't log error
+    }
+    
+    return alerts;
+  }
+
+  /**
+   * Collect active jobs
+   */
+  async collectJobs(session) {
+    const jobs = [];
+    
+    try {
+      const walkResults = await this.snmpWalkSafe(session, OID_JOB_TABLE, 5000);
+      
+      if (walkResults.length === 0) {
+        return jobs;
+      }
+      
+      const grouped = this.groupTableByIndex(walkResults);
+      
+      for (const [index, row] of Object.entries(grouped)) {
+        const job = {
+          index: parseInt(index),
+          id: row[OID_JOB_ID] || null,
+          name: row[OID_JOB_NAME] || null,
+          owner: row[OID_JOB_OWNER] || null,
+          size: row[OID_JOB_SIZE] || null,
+          total_pages: row[OID_JOB_PAGES] || null,
+        };
+        
+        jobs.push(job);
+      }
+      
+    } catch (error) {
+      // Jobs not critical, don't log error
+    }
+    
+    return jobs;
+  }
+
+  /**
+   * Collect network info (MAC, IP addresses)
+   */
+  async collectNetworkInfo(session) {
+    const info = {};
+    
+    try {
+      // MAC addresses
+      const macWalk = await this.snmpWalkSafe(session, OID_MAC_ADDRESS, 3000);
+      if (macWalk.length > 0) {
+        const macs = macWalk
+          .map(item => this.parseValue(item.value, item.type))
+          .filter(mac => mac && mac.length > 0);
+        if (macs.length > 0) {
+          info.mac_addresses = macs;
+        }
+      }
+      
+      // IP addresses
+      const ipWalk = await this.snmpWalkSafe(session, OID_IP_ADDRESS, 3000);
+      if (ipWalk.length > 0) {
+        const ips = ipWalk
+          .map(item => this.parseValue(item.value, item.type))
+          .filter(ip => ip && ip.length > 0);
+        if (ips.length > 0) {
+          info.ip_addresses = ips;
+        }
+      }
+      
+    } catch (error) {
+      // Network info not critical
+    }
+    
+    return info;
+  }
+
+  // ===================================================================
+  // VENDOR-SPECIFIC DATA COLLECTION
+  // ===================================================================
+
+  /**
+   * Collect vendor-specific data
+   */
+  async collectVendorSpecific(session, vendor) {
+    const data = {};
+    const v = VENDOR_OIDS[vendor];
+    if (!v) return data;
+
+    // Generic toner collector: try toner_black/cyan/magenta/yellow for ANY vendor
+    try {
+      const tonerKeys = ['toner_black','toner_cyan','toner_magenta','toner_yellow'];
+      const tonerOids = tonerKeys.map(k => v[k]).filter(Boolean);
+      if (tonerOids.length > 0) {
+        const binds = await this.snmpGet(session, tonerOids);
+        const levels = {};
+        const colors = ['Black','Cyan','Magenta','Yellow'];
+        tonerKeys.forEach((k, i) => {
+          const idx = tonerOids.indexOf(v[k]);
+          if (idx >= 0 && binds[idx] && !snmp.isVarbindError(binds[idx])) {
+            const val = this.parseValue(binds[idx]?.value, binds[idx]?.type);
+            if (val !== null && val >= 0) levels[colors[i]] = val;
+          }
+        });
+        if (Object.keys(levels).length > 0) {
+          data.toner_levels = levels;
+          console.log(`   ${v.name} toner direct GET: ${JSON.stringify(levels)}`);
+        }
+      }
+    } catch (e) {}
+
+    // Vendor-specific counters
+    if (vendor === 'canon') {
+      try {
+        const coids = [v.bw, v.color].filter(Boolean);
+        if (coids.length){ const cb = await this.snmpGet(session, coids);
+          if (cb[0]) data.bw = this.parseValue(cb[0].value, cb[0].type);
+          if (cb[1]) data.color = this.parseValue(cb[1].value, cb[1].type); }
+      } catch(e) {}
+    }
+    if (vendor === 'hp') {
+      try {
+        const cb = await this.snmpGet(session, [v.bw_counter, v.color_counter].filter(Boolean));
+        if (cb[0]) data.counter_bw = this.parseValue(cb[0].value, cb[0].type);
+        if (cb[1]) data.counter_color = this.parseValue(cb[1].value, cb[1].type);
+      } catch(e) {}
+    }
+    if (vendor === 'ricoh') {
+      // AMCS GetSNMP7: M1-M4 direct GET
+      try {
+        const mOids = [v.m1, v.m2, v.m3, v.m4].filter(Boolean);
+        const mBinds = await this.snmpGet(session, mOids);
+        mBinds.forEach((vb, i) => {
+          if (vb && !snmp.isVarbindError(vb)) {
+            data['m' + (i+1)] = this.parseValue(vb.value, vb.type);
+          }
+        });
+        if (data.m1) {
+          data.counter_bw = data.m1; // M1=Total Copy as BW
+          data.counter_color = 0;
+          data.total = data.m1 + (data.m2 || 0);
+        }
+      } catch(e) {}
+    }
+
+    return data;
+  }
+
+  /**
+   * Canon-specific counters
+   */
+  async collectCanonData(session) {
+    const data = {};
+    const oids = VENDOR_OIDS.canon;
+    
+    try {
+      const counterOids = [
+        oids.total,
+        oids.color,
+        oids.bw,
+        oids.print_total,
+        oids.copy_total,
+        oids.scan_total,
+        oids.fax_total,
+        oids.print_bw,
+        oids.print_color,
+        oids.copy_bw,
+        oids.copy_color,
+      ];
+      
+      const varbinds = await this.snmpGet(session, counterOids);
+      
+      const keys = ['total', 'color', 'bw', 'print_total', 'copy_total', 
+                    'scan_total', 'fax_total', 'print_bw', 'print_color', 
+                    'copy_bw', 'copy_color'];
+      
+      keys.forEach((key, idx) => {
+        const val = this.parseValue(varbinds[idx]?.value, varbinds[idx]?.type);
+        if (val !== null && val !== undefined) {
+          data[key] = val;
+        }
+      });
+    } catch (error) {
+      // Canon counters optional
+    }
+    
+    return data;
+  }
+
+  /**
+   * Brother-specific data (toner status, drum, waste, jam)
+   */
+  async collectBrotherData(session) {
+    const data = {};
+    const oids = VENDOR_OIDS.brother;
+    
+    try {
+      // Toner status
+      const tonerOids = [
+        oids.toner_black,
+        oids.toner_cyan,
+        oids.toner_magenta,
+        oids.toner_yellow,
+      ];
+      
+      const tonerBinds = await this.snmpGet(session, tonerOids);
+      const tonerColors = ['Black', 'Cyan', 'Magenta', 'Yellow'];
+      const tonerStatus = {};
+      
+      tonerColors.forEach((color, idx) => {
+        const val = this.parseValue(tonerBinds[idx]?.value, tonerBinds[idx]?.type);
+        if (val !== null && val !== undefined) {
+          tonerStatus[color] = BROTHER_TONER_STATUS[val] || `Unknown(${val})`;
+        }
+      });
+      
+      if (Object.keys(tonerStatus).length > 0) {
+        data.toner_status = tonerStatus;
+      }
+      
+      // Drum status
+      const drumOids = [
+        oids.drum_black,
+        oids.drum_cyan,
+        oids.drum_magenta,
+        oids.drum_yellow,
+      ];
+      
+      const drumBinds = await this.snmpGet(session, drumOids);
+      const drumStatus = {};
+      
+      tonerColors.forEach((color, idx) => {
+        const val = this.parseValue(drumBinds[idx]?.value, drumBinds[idx]?.type);
+        if (val !== null && val !== undefined) {
+          drumStatus[color] = val;
+        }
+      });
+      
+      if (Object.keys(drumStatus).length > 0) {
+        data.drum_status = drumStatus;
+      }
+      
+      // Waste toner
+      const wasteBinds = await this.snmpGet(session, [oids.waste_toner]);
+      const wasteVal = this.parseValue(wasteBinds[0]?.value, wasteBinds[0]?.type);
+      if (wasteVal !== null && wasteVal !== undefined) {
+        data.waste_toner = wasteVal === 0 ? 'OK' : 'Full';
+      }
+      
+      // Jam location
+      const jamBinds = await this.snmpGet(session, [oids.jam_place]);
+      const jamVal = this.parseValue(jamBinds[0]?.value, jamBinds[0]?.type);
+      if (jamVal !== null && jamVal !== undefined) {
+        data.jam = BROTHER_JAM_LOCATION[jamVal] || `Unknown(${jamVal})`;
+      }
+      
+    } catch (error) {
+      // Brother data optional
+    }
+    
+    return data;
+  }
+
+  /**
+   * Xerox-specific data — direct GET toner from enterprise OIDs
+   * More accurate than standard MIB supplies walk for Xerox devices
+   */
+  async collectXeroxData(session) {
+    const data = {};
+    const oids = VENDOR_OIDS.xerox;
+
+    try {
+      const tonerOids = [
+        oids.toner_black, oids.toner_cyan, oids.toner_magenta, oids.toner_yellow,
+      ];
+      const tonerBinds = await this.snmpGet(session, tonerOids);
+      const tonerLevels = {};
+      ['Black', 'Cyan', 'Magenta', 'Yellow'].forEach((color, idx) => {
+        if (!snmp.isVarbindError(tonerBinds[idx])) {
+          const val = this.parseValue(tonerBinds[idx]?.value, tonerBinds[idx]?.type);
+          if (val !== null && val >= 0) tonerLevels[color] = val;
+        }
+      });
+      if (Object.keys(tonerLevels).length > 0) {
+        data.toner_levels = tonerLevels;
+        console.log(`   Xerox toner direct GET: ${JSON.stringify(tonerLevels)}`);
+      }
+    } catch (e) {}
+
+    return data;
+  }
+
+  /**
+   * Ricoh-specific data — use direct GETs because walk may fail
+   * FIXED: Ricoh private toner OIDs often don't work; use standard MIB + Ricoh counters
+   */
+  async collectRicohData(session) {
+    const data = {};
+    const oids = VENDOR_OIDS.ricoh;
+    
+    try {
+      // Counters via direct GET (confirmed working for IM C2010)
+      try {
+        const counterOids = [
+          oids.counter_bw,
+          oids.counter_color,
+        ];
+        
+        const counterBinds = await this.snmpGet(session, counterOids);
+        if (counterBinds && counterBinds.length >= 2) {
+          const bw = this.parseValue(counterBinds[0]?.value, counterBinds[0]?.type);
+          const color = this.parseValue(counterBinds[1]?.value, counterBinds[1]?.type);
+          
+          if (bw !== null && bw !== undefined && bw > 0) {
+            data.counter_bw = bw;
+          }
+          if (color !== null && color !== undefined && color > 0) {
+            data.counter_color = color;
+          }
+        }
+      } catch (e) {}
+      
+      // Try Ricoh private toner OIDs (may or may not work per model)
+      try {
+        const tonerOids = [
+          oids.toner_black, oids.toner_cyan, oids.toner_magenta, oids.toner_yellow,
+          oids.toner_desc_1, oids.toner_desc_2, oids.toner_desc_3, oids.toner_desc_4,
+        ];
+        
+        const tonerBinds = await this.snmpGet(session, tonerOids);
+        const tonerLevels = {};
+        
+        ['Black', 'Cyan', 'Magenta', 'Yellow'].forEach((color, idx) => {
+          if (!snmp.isVarbindError(tonerBinds[idx])) {
+            const val = this.parseValue(tonerBinds[idx]?.value, tonerBinds[idx]?.type);
+            if (val !== null && val >= 0) tonerLevels[color] = val;
+          }
+        });
+        
+        if (Object.keys(tonerLevels).length > 0) {
+          data.toner_levels = tonerLevels;
+        }
+      } catch (e) {}
+      
+    } catch (error) {
+      console.log(`   ⚠️  Ricoh-specific error: ${error.message}`);
+    }
+    
+    return data;
+  }
+
+  /**
+   * Epson-specific data
+   */
+  async collectEpsonData(session) {
+    const data = {};
+    const oids = VENDOR_OIDS.epson;
+    
+    try {
+      const epsonOids = [
+        oids.product_name,
+        oids.serial,
+        oids.total_pages,
+      ];
+      
+      const varbinds = await this.snmpGet(session, epsonOids);
+      
+      const productName = this.parseValue(varbinds[0]?.value, varbinds[0]?.type);
+      if (productName) data.product_name = productName;
+      
+      const serial = this.parseValue(varbinds[1]?.value, varbinds[1]?.type);
+      if (serial) data.serial_number = serial;
+      
+      const totalPages = this.parseValue(varbinds[2]?.value, varbinds[2]?.type);
+      if (totalPages) data.total_pages = totalPages;
+      
+    } catch (error) {
+      // Epson data optional
+    }
+    
+    return data;
+  }
+
+  /**
+   * Kyocera-specific data
+   */
+  async collectKyoceraData(session) {
+    const data = {};
+    const oids = VENDOR_OIDS.kyocera;
+    
+    try {
+      // Walk marker table
+      const markerWalk = await this.snmpWalkSafe(session, oids.marker, 5000);
+      if (markerWalk.length > 0) {
+        data.marker_count = markerWalk.length;
+      }
+    } catch (error) {
+      // Kyocera data optional
+    }
+    
+    return data;
+  }
+
+  // ===================================================================
+  // MAIN COMPREHENSIVE PROBE FUNCTION
+  // ===================================================================
+
+  /**
+   * Probe device comprehensively — collect ALL data
+   * Strategy: snmpy deep (fastest, 15+ subtrees) → snmpy standard → Node.js fallback
+   * Only returns MFP/printer devices — skips switches, UPS, servers
+   */
+  async probeDeviceComprehensive(host) {
+    // First: quick SNMP check to see if device is a printer (sysDescr + sysObjectID)
+    let isMfp = false;
+    let briefInfo = null;
+    let session = null;
+    try {
+      session = this.createSession(host);
+      briefInfo = await this.collectDeviceInfo(session);
+      isMfp = this.isPrinter(briefInfo.sys_descr) || briefInfo.vendor !== 'unknown';
+    } catch (e) {
+      // snmpy will also work; skip filter
+    } finally {
+      if (session) try { session.close(); } catch(e) {}
+    }
+
+    // Strategy 1: snmpy deep probe — only if it's likely a printer or unknown
+    if (isMfp || briefInfo === null) {
+      try {
+        const snmpyAvailable = await this._snmpy.isAvailable();
+        if (snmpyAvailable) {
+          const result = await this._snmpy.deepProbePrinter(host, this.community, Math.floor(this.timeout / 1000));
+          if (result && result.vendor) {
+            const tonerCount = (result.supplies?.toners || result.toner_levels || []).length;
+            const rawCount = Object.keys(result.raw_oids || {}).reduce((a,k) => a + Object.keys(result.raw_oids[k] || {}).length, 0);
+            console.log(`   ✓ snmpy deep: ${result.vendor} ${result.model} | ${tonerCount} toner(s), ${result.total_pages} pages | ${rawCount} raw OIDs`);
+            return result;
+          }
+        }
+      } catch (err) {
+        console.log(`   ⚠️  snmpy deep probe unavailable (${err.message}), trying standard...`);
+      }
+      
+      // Strategy 2: snmpy standard probe
+      try {
+        const snmpyAvailable = await this._snmpy.isAvailable();
+        if (snmpyAvailable) {
+          const result = await this._snmpy.probePrinter(host, this.community, Math.floor(this.timeout / 1000));
+          if (result && result.vendor) {
+            console.log(`   ✓ snmpy: ${result.vendor} ${result.model} | ${result.toner_levels.length} toner(s), ${result.total_pages} pages`);
+            return result;
+          }
+        }
+      } catch (err) {
+        console.log(`   ⚠️  snmpy unavailable (${err.message}), falling back to Node.js...`);
+      }
+    }
+
+    // Strategy 3: Node.js SNMP (only if it's a printer)
+    if (isMfp) {
+      const nodeResult = await this.probeDeviceNodejs(host);
+      if (nodeResult) return nodeResult;
+      
+      // Strategy 4: OID Profile direct GET (last resort — works when walk fails but GET works)
+      console.log(`   Trying OID profile direct GET for ${host}...`);
+      return await this.probeViaProfile(host);
+    }
+    
+    return null; // Not a printer
+  }
+
+  /**
+   * Node.js SNMP probe (fallback when snmpy not available)
+   * Uses net-snmp walk → manual GETNEXT → vendor-specific
+   */
+  async probeDeviceNodejs(host) {
+    let session = null;
+    
+    try {
+      // Create session
+      session = this.createSession(host);
+      
+      // Step 1: Get basic device info to check if it's a printer
+      console.log(`   Probing ${host}...`);
+      const deviceInfo = await this.collectDeviceInfo(session);
+      
+      // Check if it's a printer
+      if (!this.isPrinter(deviceInfo.sys_descr)) {
+        session.close();
+        return null;
+      }
+      
+      console.log(`   ✓ Printer detected: ${deviceInfo.vendor} ${deviceInfo.model || '?'}`);
+      
+      // Step 2: Try vendor-specific data FIRST (more reliable for known vendors)
+      let vendorData = {};
+      if (deviceInfo.vendor && deviceInfo.vendor !== 'unknown') {
+        console.log(`   Collecting vendor-specific data for ${deviceInfo.vendor}...`);
+        vendorData = await this.collectVendorSpecific(session, deviceInfo.vendor);
+      }
+      
+      // Step 3: Collect standard data (may overlap with vendor-specific, that's OK)
+      console.log(`   Collecting standard MIB data...`);
+      const [counters, supplies, trays, alerts, jobs, networkInfo] = await Promise.allSettled([
+        this.collectCounters(session),
+        this.collectSupplies(session),
+        this.collectInputTrays(session),
+        this.collectAlerts(session),
+        this.collectJobs(session),
+        this.collectNetworkInfo(session),
+      ]);
+      
+      const counterData = counters.status === 'fulfilled' ? counters.value : [];
+      const suppliesData = supplies.status === 'fulfilled' ? supplies.value : { toners: [], waste: [], drums: [], others: [] };
+      const traysData = trays.status === 'fulfilled' ? trays.value : [];
+      const alertsData = alerts.status === 'fulfilled' ? alerts.value : [];
+      const jobsData = jobs.status === 'fulfilled' ? jobs.value : [];
+      const networkData = networkInfo.status === 'fulfilled' ? networkInfo.value : {};
+
+      // Step 4: Try vendor-specific counter data if standard is empty
+      let finalCounters = counterData;
+      if (counterData.length === 0) {
+        if (vendorData && Object.keys(vendorData).length > 0) {
+          console.log('   Using vendor-specific counters as fallback');
+          finalCounters = this.convertVendorCountersToStandard(vendorData, deviceInfo.vendor);
+        }
+        // Try AMCS-style OID profile direct GET
+        if (finalCounters.length === 0) {
+          const matchedProfile = this.matchOidProfile(deviceInfo.vendor, deviceInfo.model || deviceInfo.sys_descr);
+          if (matchedProfile) {
+            console.log('   Using OID profile: ' + matchedProfile.display);
+            const profileData = await this.collectViaProfile(session, matchedProfile);
+            if (profileData.counters.length > 0) finalCounters = profileData.counters;
+            if (profileData.toners && profileData.toners.length > 0) suppliesData.toners = profileData.toners;
+          }
+        }
+      }
+
+      // Merge vendor-specific toner levels into supplies (more accurate for Xerox/Ricoh)
+      if (vendorData && vendorData.toner_levels && Object.keys(vendorData.toner_levels).length > 0) {
+        const vt = vendorData.toner_levels;
+        console.log('   Merging vendor-specific toner: ' + JSON.stringify(vt));
+        suppliesData.toners = Object.entries(vt).map(([color, level]) => ({
+          description: color + ' Toner',
+          type_code: 3, type: 'Toner', class_code: 3, class: 'Consumable',
+          percentage: Math.max(0, Math.min(100, parseInt(level) || 0)),
+          level_raw: level, max_capacity_raw: 100, unit: null,
+        }));
+      }
+
+      // Add AMCS-style M1/M2/M3/M4 labels
+      finalCounters = finalCounters.map((m, i) => ({
+        ...m,
+        amcs_label: i === 0 ? AMCS_BW_LABELS[0] : i === 1 ? AMCS_COLOR_LABELS[0] : 'M' + (i+1),
+      }));
+
+      // Build final device object
+      const result = {
+        ip: host,
+        hostname: deviceInfo.hostname || host,
+        vendor: deviceInfo.vendor,
+        model: deviceInfo.model || this.detectModel(deviceInfo.sys_descr),
+        serial: deviceInfo.serial,
+        location: deviceInfo.location,
+        uptime: deviceInfo.uptime_human,
+        status: deviceInfo.host_status,
+        total_pages: 0, total_bw: 0, total_color: 0,
+        toner_levels: suppliesData.toners.map(t => ({ color: t.description, percentage: t.percentage, status: t.percentage !== null ? (t.percentage < 10 ? 'Critical' : t.percentage < 30 ? 'Low' : 'OK') : 'Unknown' })),
+        waste_toner: suppliesData.waste.map(w => ({ description: w.description, percentage: w.percentage, status: w.percentage !== null ? (w.percentage > 85 ? 'Full' : 'OK') : 'Unknown' })),
+        paper_trays: traysData.map(t => ({ index: t.index, media: t.media_name, percentage: t.percentage, sheets: t.current_level })),
+        critical_alerts: alertsData.filter(a => a.severity_code === 3).length,
+        warnings: alertsData.filter(a => a.severity_code === 2).length,
+        active_jobs: jobsData.length,
+        details: { device_info: deviceInfo, counters: finalCounters, supplies: suppliesData, paper_trays: traysData, alerts: alertsData, jobs: jobsData, network: networkData, vendor_specific: vendorData },
+        scan_time: new Date().toISOString(),
+      };
+
+      let tp = 0, tbw = 0, tcol = 0;
+      finalCounters.forEach(m => {
+        const c = parseInt(m.life_count) || 0;
+        tp += c;
+        // AMCS-aware: use meter_name if available, else fallback to colorant+index heuristic
+        const mn = (m.meter_name || m.amcs_label || '').toLowerCase();
+        const cl = (m.colorant || '').toLowerCase();
+        if (mn.includes('bw') || mn.includes('black') || mn.includes('copy') || mn.includes('print') || mn.includes('fax') || mn.includes('total') || mn.includes('m2') || mn.includes('m3') || mn.includes('m4')) {
+          tbw += c; // AMCS/M1-M4 counters: BW additive
+        } else if (mn.includes('color') && !mn.includes('black')) {
+          tcol += c;
+        } else if (cl.includes('black') || cl === 'bk' || m.index === 1) tbw += c;
+        else if (cl.includes('color')) tcol += c;
+        else if (m.index === 1) tbw += c; else tbw += c; // Default: all BW (conservative)
+      });
+      if (tp > 0 && tbw === 0 && tcol === 0) tbw = tp;
+      // Bad Color split health check: if color % > 50% but no explicit color OID, suspect BW
+      if (tcol > tbw && !finalCounters.some(m => m.colorant === 'color' || (m.meter_name||'').toLowerCase().includes('color'))) {
+        tcol = 0; tbw = tp; console.log('   ⚠️ Color spike corrected: reassigned to BW');
+      }
+      result.total_pages = tp; result.total_bw = tbw; result.total_color = tcol;
+
+      console.log('   Collected: ' + finalCounters.length + ' counter(s), ' + suppliesData.toners.length + ' toner(s)');
+      return result;
+
+    } catch (error) {
+      console.error('   Probe failed: ' + (error.message || error));
+      return null;
+    } finally {
+      if (session) try { session.close(); } catch(e) {}
+    }
+  }
+
+  /**
+   * Match OID profile by vendor + model pattern (from 50+ oid_library builtins)
+   */
+  matchOidProfile(vendor, model) {
+    if (!vendor || vendor === 'unknown') {
+      // Universal fallback
+      return OID_PROFILES.find(p => p.merk === 'Unknown' && p.pattern === '*') || null;
+    }
+    const vendorLower = vendor.toLowerCase();
+    const modelUpper = (model || '').toUpperCase();
+
+    // Find exact vendor first, then pattern-match
+    const vendorProfiles = OID_PROFILES.filter(p => p.merk.toLowerCase() === vendorLower);
+    if (vendorProfiles.length === 0) {
+      // Try normalized vendor name
+      const altVendor = { konicaminolta:'Konica Minolta', fujixerox:'Fuji Xerox' }[vendorLower];
+      if (altVendor) {
+        const alt = OID_PROFILES.filter(p => p.merk.toLowerCase() === altVendor.toLowerCase());
+        if (alt.length > 0) {
+          return this._matchByPattern(alt, modelUpper) || OID_PROFILES.find(p => p.merk === 'Unknown');
+        }
+      }
+      return OID_PROFILES.find(p => p.merk === 'Unknown') || null;
+    }
+    return this._matchByPattern(vendorProfiles, modelUpper) || null;
+  }
+
+  _matchByPattern(profiles, modelUpper) {
+    // 1. Exact pattern match (e.g. 'WorkCentre' in 'WorkCentre 5735')
+    for (const p of profiles) {
+      if (p.pattern !== '*' && modelUpper.includes(p.pattern.toUpperCase())) {
+        return p;
+      }
+    }
+    // 2. Generic fallback for this vendor
+    return profiles.find(p => p.pattern === '*');
+  }
+
+  /**
+   * Collect counters and toners via direct GET using OID profile
+   */
+  async collectViaProfile(session, profile) {
+    const result = { counters: [], toners: [] };
+    if (!profile) return result;
+
+    // AMCS M1-M4 multi-counter (e.g. Ricoh group7, Canon group4, Xerox group2)
+    const mOids = ['oid_m1','oid_m2','oid_m3','oid_m4'].map(k => profile[k]).filter(Boolean);
+    const mLabels = profile.amcs_labels || ['M1','M2','M3','M4'];
+    if (mOids.length > 0) {
+      try {
+        const mBinds = await this.snmpGet(session, mOids);
+        mBinds.forEach((vb, idx) => {
+          if (vb && !snmp.isVarbindError(vb)) {
+            const val = this.parseValue(vb.value, vb.type);
+            if (val !== null && val > 0) {
+              result.counters.push({
+                index: idx + 1,
+                life_count: parseInt(val) || 0,
+                tech: 3, tech_name: 'Electrophotographic(Laser)',
+                counter_unit: 7,
+                colorant: idx === 0 ? 'black' : null,
+                amcs_label: mLabels[idx] || ('M' + (idx+1)),
+                meter_name: mLabels[idx] || ('M' + (idx+1)),
+              });
+            }
+          }
+        });
+      } catch (e) {}
+      // If M1-M4 got data, skip generic oid_total_bw/color (redundant)
+      if (result.counters.length > 0) {
+        console.log(`   AMCS M1-M4 profile GET: ${result.counters.length} counters`);
+      }
+    }
+
+    // Build OID list: all non-null OIDs from profile (skip oid_m1-4, already fetched)
+    const oidMap = {
+      oid_total_bw:     { key:'bw', label:'BW' },
+      oid_total_color:  { key:'color', label:'Color' },
+      oid_toner_black:  { key:'toner_b', label:'Black Toner' },
+      oid_toner_cyan:   { key:'toner_c', label:'Cyan Toner' },
+      oid_toner_magenta:{ key:'toner_m', label:'Magenta Toner' },
+      oid_toner_yellow: { key:'toner_y', label:'Yellow Toner' },
+      oid_serial:       { key:'serial', label:'Serial' },
+      oid_device_status:{ key:'status', label:'Device Status' },
+    };
+
+    const oidsToGet = [];
+    const oidMeta = [];
+    for (const [oidField, meta] of Object.entries(oidMap)) {
+      const oid = profile[oidField];
+      if (oid) {
+        oidsToGet.push(oid);
+        oidMeta.push(meta);
+      }
+    }
+
+    if (oidsToGet.length === 0) return result;
+
+    try {
+      const varbinds = await this.snmpGet(session, oidsToGet);
+      oidMeta.forEach((meta, idx) => {
+        if (idx < varbinds.length && !snmp.isVarbindError(varbinds[idx])) {
+          const val = this.parseValue(varbinds[idx]?.value, varbinds[idx]?.type);
+          if (val !== null && val !== undefined) {
+            // Skip BW/Color if M1-M4 already fetched (prevents duplicate)
+            if ((meta.key === 'bw' || meta.key === 'color') && result.counters.length > 0) return;
+            if (meta.key === 'bw' || meta.key === 'color') {
+              result.counters.push({
+                index: meta.key === 'bw' ? 1 : 2,
+                life_count: parseInt(val) || 0,
+                tech: 3, tech_name: 'Electrophotographic(Laser)',
+                counter_unit: 7,
+                colorant: meta.key === 'bw' ? 'black' : 'color',
+                amcs_label: meta.key === 'bw' ? AMCS_BW_LABELS[0] : AMCS_COLOR_LABELS[0],
+              });
+            } else if (meta.key.startsWith('toner_')) {
+              const colorMap = { toner_b:'Black', toner_c:'Cyan', toner_m:'Magenta', toner_y:'Yellow' };
+              result.toners.push({
+                color: colorMap[meta.key] || meta.key,
+                percentage: Math.max(0, Math.min(100, parseInt(val) || 0)),
+                status: parseInt(val) < 10 ? 'Critical' : parseInt(val) < 30 ? 'Low' : 'OK',
+              });
+            }
+          }
+        }
+      });
+      if (result.counters.length > 0 || result.toners.length > 0) {
+        console.log(`   Profile GET: ${result.counters.length} counter(s), ${result.toners.length} toner(s)`);
+      }
+    } catch (e) {}
+
+    return result;
+  }
+
+  /**
+   * Convert vendor-specific counter data to standard format
+   * (Expanded to support Ricoh, Brother, Kyocera, Epson)
+   */
+  convertVendorCountersToStandard(vendorData, vendor) {
+    const counters = [];
+    if (!vendorData || Object.keys(vendorData).length === 0) return counters;
+
+    if (vendor === 'canon') {
+      if (vendorData.bw) {
+        counters.push({ index:1, life_count: vendorData.bw, tech:3, tech_name:'Electrophotographic(Laser)', counter_unit:7, colorant:'black', amcs_label:AMCS_BW_LABELS[0] });
+      }
+      if (vendorData.color) {
+        counters.push({ index:2, life_count: vendorData.color, tech:3, tech_name:'Electrophotographic(Laser)', counter_unit:7, colorant:'color', amcs_label:AMCS_COLOR_LABELS[0] });
+      }
+      if (!vendorData.bw && !vendorData.color && vendorData.total) {
+        counters.push({ index:1, life_count: vendorData.total, tech:3, tech_name:'Electrophotographic(Laser)', counter_unit:7, colorant:'black', amcs_label:AMCS_BW_LABELS[0] });
+      }
+    }
+
+    if (vendor === 'ricoh') {
+      // AMCS GetSNMP7 M1-M4: .19.1.0=TotalCopy, .19.2.0=Print, .19.3.0=Fax, .19.4.0=CopyBW
+      const ricohLabels = ['M1:Total Copy','M2:Total Print','M3:Fax','M4:Copy BW'];
+      for (let i = 1; i <= 4; i++) {
+        const key = 'm' + i;
+        if (vendorData[key]) {
+          counters.push({ index:i, life_count: vendorData[key], tech:3, tech_name:'Electrophotographic(Laser)', counter_unit:7, colorant:i===1?'black':null, amcs_label:ricohLabels[i-1], meter_name:ricohLabels[i-1] });
+        }
+      }
+      if (counters.length === 0 && vendorData.counter_bw) {
+        counters.push({ index:1, life_count: vendorData.counter_bw, tech:3, tech_name:'Electrophotographic(Laser)', counter_unit:7, colorant:'black', amcs_label:AMCS_BW_LABELS[0] });
+      }
+    }
+
+    if (vendor === 'hp') {
+      // AMCS GetSNMP6: .11.2.3.9.4.2.1.4.1.2.6.0=BW impressions, .7.0=Color impressions
+      if (vendorData.counter_bw) {
+        counters.push({ index:1, life_count: vendorData.counter_bw, tech:3, tech_name:'Electrophotographic(Laser)', counter_unit:7, colorant:'black', amcs_label:'BW impressions' });
+      }
+      if (vendorData.counter_color) {
+        counters.push({ index:2, life_count: vendorData.counter_color, tech:3, tech_name:'Electrophotographic(Laser)', counter_unit:7, colorant:'color', amcs_label:'Color impressions' });
+      }
+    }
+
+    return counters;
+  }
+
+  /**
+   * Probe printer by matching OID profile and doing direct GETs
+   * Used as last resort when walk fails but device responds to SNMP
+   */
+  async probeViaProfile(host) {
+    let session = null;
+    try {
+      session = this.createSession(host);
+      const info = await this.collectDeviceInfo(session);
+      if (!info.vendor || info.vendor === 'unknown') return null;
+
+      const profile = this.matchOidProfile(info.vendor, info.model || info.sys_descr);
+      if (!profile) return null;
+
+      console.log(`   Via OID profile: ${profile.display}`);
+      const profileData = await this.collectViaProfile(session, profile);
+
+      if (profileData.counters.length === 0 && profileData.toners.length === 0) return null;
+
+      const totalPages = profileData.counters.reduce((s, c) => s + (parseInt(c.life_count) || 0), 0);
+      let totalBW = 0, totalColor = 0;
+      profileData.counters.forEach(c => {
+        if (c.colorant === 'black' || c.index === 1) totalBW += parseInt(c.life_count) || 0;
+        else totalColor += parseInt(c.life_count) || 0;
+      });
+      if (totalPages > 0 && totalBW === 0 && totalColor === 0) totalBW = totalPages;
+
+      return {
+        ip: host,
+        hostname: info.hostname || host,
+        vendor: info.vendor,
+        model: info.model || this.detectModel(info.sys_descr),
+        serial: info.serial, location: info.location,
+        uptime: info.uptime_human, status: info.host_status,
+        total_pages: totalPages, total_bw: totalBW, total_color: totalColor,
+        toner_levels: profileData.toners,
+        waste_toner: [], paper_trays: [],
+        critical_alerts: 0, warnings: 0, active_jobs: 0,
+        details: { device_info: info },
+        scan_time: new Date().toISOString(),
+      };
+    } catch (e) {
+      console.log(`   Profile probe failed: ${e.message}`);
+      return null;
+    } finally {
+      if (session) try { session.close(); } catch(e) {}
+    }
+  }
+}
+
+// =====================================================================
+// EXPORT
+// =====================================================================
+
+module.exports = ComprehensiveScanner;

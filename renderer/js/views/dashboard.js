@@ -16,8 +16,17 @@ app.registerView('dashboard', {
         <div class="flex items-center gap-4">
           <div class="text-right">
             <div class="text-sm font-medium" id="user-role-display">Logged in</div>
-            <div class="text-xs text-indigo-200">System Ready</div>
+            <div class="text-xs text-indigo-200" id="user-sub-display">System Ready</div>
           </div>
+          <div id="layered-badge" class="hidden flex-col items-end">
+            <div class="text-xs font-bold text-amber-200 bg-amber-500/20 rounded-full px-2 py-0.5 flex items-center gap-1">
+              <i class="ph ph-shield-check"></i> <span id="layered-name">Teknisi</span>
+            </div>
+            <div class="text-[9px] text-amber-100/80 mt-0.5" id="layered-countdown"></div>
+          </div>
+          <button id="btn-layered-login" class="hidden px-3 py-2 bg-amber-500 hover:bg-amber-400 text-white text-xs font-medium rounded-lg transition-colors">
+            <i class="ph ph-sign-in"></i> Login Teknisi/Admin
+          </button>
           <button id="btn-send-log" class="hidden px-4 py-2 bg-emerald-500 hover:bg-emerald-400 rounded-lg text-sm font-medium transition-colors">
             Kirim Log & Catatan
           </button>
@@ -164,9 +173,162 @@ app.registerView('dashboard', {
 
     // Logout
     document.getElementById('btn-logout').onclick = async () => {
+      // If layered (admin/tech) session active → just drop layered, stay on PIC
+      if (app.config.layered_user) {
+        await ipcRenderer.invoke('logout-layered');
+        app.config = await ipcRenderer.invoke('get-config');
+        this._renderLayeredState();
+        app.toast('Kembali ke akun PIC (' + (app.config.pic_user?.nama || app.config.pic_user?.email || 'PIC') + ')');
+        return;
+      }
       await ipcRenderer.invoke('logout');
       app.navigate('login');
     };
+
+    // ── Layered login (Admin/Technician above PIC) + idle timeout ──
+    this._renderLayeredState = () => {
+      const layered = app.config.layered_user;
+      const badge = document.getElementById('layered-badge');
+      const btn = document.getElementById('btn-layered-login');
+      if (!badge || !btn) return;
+      if (layered) {
+        badge.classList.remove('hidden');
+        badge.classList.add('flex');
+        btn.classList.add('hidden');
+        document.getElementById('layered-name').textContent =
+          (layered.nama || layered.email) + ' · ' + (layered.role || '');
+        // Update permissions for activity editing
+        this.canChangeSettings = ['SUPER_ADMIN', 'TEKNISI', 'TENANT_ADMIN', 'OPERATOR'].includes(layered.role);
+        window.agentCanChangeSettings = this.canChangeSettings;
+        this.userRole = layered.role;
+        document.getElementById('user-role-display').textContent = layered.role;
+        this._startIdleTimer();
+      } else {
+        badge.classList.add('hidden');
+        badge.classList.remove('flex');
+        btn.classList.remove('hidden');
+        // Back to PIC role
+        const picRole = (app.config.pic_user && app.config.pic_user.role) || 'AGENT';
+        this.canChangeSettings = ['SUPER_ADMIN', 'TEKNISI', 'TENANT_ADMIN', 'OPERATOR'].includes(picRole);
+        window.agentCanChangeSettings = this.canChangeSettings;
+        this.userRole = picRole;
+        document.getElementById('user-role-display').textContent = picRole || 'AGENT';
+        this._stopIdleTimer();
+      }
+    };
+
+    this._stopIdleTimer = () => {
+      if (this._idleTimer) { clearInterval(this._idleTimer); this._idleTimer = null; }
+      if (this._idleDeadline) {
+        window.removeEventListener('mousemove', this._onIdleActivity);
+        window.removeEventListener('keydown', this._onIdleActivity);
+        window.removeEventListener('click', this._onIdleActivity);
+        this._idleDeadline = null;
+      }
+    };
+
+    this._onIdleActivity = () => {
+      if (app.config.layered_user) {
+        const min = app.config.idle_timeout_min || 5;
+        this._idleDeadline = Date.now() + min * 60000;
+        this._updateCountdown();
+      }
+    };
+
+    this._startIdleTimer = () => {
+      this._stopIdleTimer();
+      const min = app.config.idle_timeout_min || 5;
+      this._idleDeadline = Date.now() + min * 60000;
+      window.addEventListener('mousemove', this._onIdleActivity, { passive: true });
+      window.addEventListener('keydown', this._onIdleActivity, { passive: true });
+      window.addEventListener('click', this._onIdleActivity, { passive: true });
+      this._updateCountdown();
+      this._idleTimer = setInterval(() => {
+        if (!app.config.layered_user) return;
+        if (Date.now() >= this._idleDeadline) {
+          this._idleTimeoutLayered();
+        } else {
+          this._updateCountdown();
+        }
+      }, 1000);
+    };
+
+    this._updateCountdown = () => {
+      const el = document.getElementById('layered-countdown');
+      if (!el || !this._idleDeadline) return;
+      const s = Math.max(0, Math.round((this._idleDeadline - Date.now()) / 1000));
+      const m = Math.floor(s / 60), sec = s % 60;
+      el.textContent = `Idle logout: ${m}:${String(sec).padStart(2,'0')}`;
+    };
+
+    this._idleTimeoutLayered = async () => {
+      const { ipcRenderer } = require('electron');
+      console.log('[Layered] Idle timeout — kembali ke PIC');
+      await ipcRenderer.invoke('logout-layered');
+      app.config = await ipcRenderer.invoke('get-config');
+      this._renderLayeredState();
+      app.toast('Sesi Teknisi/Admin berakhir (idle). Kembali ke akun PIC.', 'warning');
+    };
+
+    // Layered login button → modal
+    document.getElementById('btn-layered-login').onclick = () => {
+      this._showLayeredLoginModal();
+    };
+
+    this._showLayeredLoginModal = () => {
+      app.openModal(`
+        <div class="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm" data-modal-backdrop>
+          <div class="bg-white dark:bg-slate-800 rounded-xl shadow-2xl w-full max-w-sm mx-4 p-6">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-base font-bold text-slate-800 dark:text-white"><i class="ph ph-shield-check text-amber-500"></i> Login Teknisi/Admin</h3>
+              <button onclick="app.closeModal()" class="w-7 h-7 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 text-slate-500 flex items-center justify-center">&times;</button>
+            </div>
+            <p class="text-xs text-slate-500 mb-4">Masuk sebagai Teknisi/Admin untuk akses edit. PIC: <b>${(app.config.pic_user?.nama) || (app.config.pic_user?.email) || '-'}</b></p>
+            <div class="space-y-3">
+              <div>
+                <label class="block text-xs font-medium text-slate-600 mb-1">Email</label>
+                <input id="layered-email" type="email" class="w-full px-3 py-2 border border-slate-300 dark:border-slate-600 rounded-lg text-sm bg-white dark:bg-slate-700 focus:ring-2 focus:ring-amber-500 outline-none" placeholder="teknisi@perusahaan.com">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-slate-600 mb-1">Password</label>
+                <input id="layered-password" type="password" class="w-full px-3 py-2 border border-slate-300 dark:border-slate-600 rounded-lg text-sm bg-white dark:bg-slate-700 focus:ring-2 focus:ring-amber-500 outline-none">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-slate-600 mb-1">Idle Timeout (menit) <span class="text-slate-400 font-normal">— default 5</span></label>
+                <input id="layered-timeout" type="number" min="1" max="120" value="${app.config.idle_timeout_min || 5}" class="w-full px-3 py-2 border border-slate-300 dark:border-slate-600 rounded-lg text-sm bg-white dark:bg-slate-700 focus:ring-2 focus:ring-amber-500 outline-none">
+              </div>
+              <button id="btn-layered-submit" onclick="app.views.dashboard._submitLayeredLogin()" class="w-full py-2 bg-amber-500 hover:bg-amber-400 text-white text-sm font-medium rounded-lg transition-colors">Login Teknisi/Admin</button>
+            </div>
+          </div>
+        </div>`);
+    };
+
+    this._submitLayeredLogin = async () => {
+      const { ipcRenderer } = require('electron');
+      const email = document.getElementById('layered-email').value.trim();
+      const password = document.getElementById('layered-password').value;
+      const timeout = parseInt(document.getElementById('layered-timeout').value) || 5;
+      if (!email || !password) { app.toast('Email dan password wajib', 'error'); return; }
+      const btn = document.getElementById('btn-layered-submit');
+      btn.disabled = true; btn.textContent = 'Memverifikasi...';
+      try {
+        await ipcRenderer.invoke('layered-login', { email, password });
+        if (timeout !== (app.config.idle_timeout_min || 5)) {
+          await ipcRenderer.invoke('save-idle-timeout', timeout);
+        }
+        app.config = await ipcRenderer.invoke('get-config');
+        app.closeModal();
+        this._renderLayeredState();
+        app.toast('Login Teknisi/Admin berhasil. Idle logout: ' + (app.config.idle_timeout_min || 5) + ' menit.', 'success');
+      } catch (err) {
+        app.toast((err.message || 'Login gagal').replace(/^Error invoking remote method '.*?':\s*/, ''), 'error');
+      } finally {
+        btn.disabled = false; btn.textContent = 'Login Teknisi/Admin';
+      }
+    };
+
+    // Initial layered state
+    this._renderLayeredState();
 
     // Send Log
     const sendLogBtn = document.getElementById('btn-send-log');
@@ -825,12 +987,8 @@ window.openWebUI = (ip) => {
 window.showActivityModal = async (mesinId) => {
   const { ipcRenderer } = require('electron');
   const dev = (app.config.tracked_devices || []).find(d => Number(d.id) === Number(mesinId));
-
-  app.openModal(`<div class="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm"><div class="bg-white dark:bg-slate-800 rounded-xl shadow-2xl w-full max-w-lg mx-4 max-h-[85vh] flex flex-col overflow-hidden">
-    <div class="flex items-center justify-between px-5 py-3 border-b border-slate-100 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/50">
-      <div class="flex items-center gap-2"><i class="ph ph-clock-counter-clockwise text-indigo-600 text-lg"></i><h3 class="text-sm font-bold text-slate-800 dark:text-white">Riwayat Aktifitas Mesin</h3></div>
-      <button onclick="app.closeModal()" class="w-7 h-7 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 text-slate-500 flex items-center justify-center transition-colors">&times;</button>
-    </div>
+  const canEdit = !!window.agentCanChangeSettings;
+  const formHtml = canEdit ? `
     <div class="p-4 border-b border-slate-100 dark:border-slate-700 space-y-2 bg-white dark:bg-slate-800">
       <div class="grid grid-cols-2 gap-2">
         <div><label class="text-[10px] font-medium text-slate-500">Jenis Aktifitas</label>
@@ -854,7 +1012,17 @@ window.showActivityModal = async (mesinId) => {
           <input id="act-tgl" type="date" value="${new Date().toISOString().slice(0,10)}" class="w-full mt-0.5 px-2 py-1.5 border border-slate-200 dark:border-slate-600 rounded-lg text-xs bg-white dark:bg-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"></div>
       </div>
       <button id="act-save" onclick="window.saveActivity(${mesinId})" class="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium rounded-lg transition-colors">Tambah Aktifitas</button>
+    </div>` : `
+    <div class="px-4 py-2.5 border-b border-slate-100 dark:border-slate-700 bg-amber-50/50 dark:bg-amber-900/10 text-[11px] text-amber-700 dark:text-amber-400 flex items-center gap-1.5">
+      <i class="ph ph-info"></i> Akun PIC hanya bisa melihat. Login Teknisi/Admin untuk menambah atau mengedit aktifitas.
+    </div>`;
+
+  app.openModal(`<div class="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm"><div class="bg-white dark:bg-slate-800 rounded-xl shadow-2xl w-full max-w-lg mx-4 max-h-[85vh] flex flex-col overflow-hidden">
+    <div class="flex items-center justify-between px-5 py-3 border-b border-slate-100 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/50">
+      <div class="flex items-center gap-2"><i class="ph ph-clock-counter-clockwise text-indigo-600 text-lg"></i><h3 class="text-sm font-bold text-slate-800 dark:text-white">Riwayat Aktifitas Mesin</h3></div>
+      <button onclick="app.closeModal()" class="w-7 h-7 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 text-slate-500 flex items-center justify-center transition-colors">&times;</button>
     </div>
+    ${formHtml}
     <div id="act-list" class="flex-1 overflow-y-auto p-3 space-y-2 bg-slate-50 dark:bg-slate-900">
       <div class="text-center text-xs text-slate-400 py-6"><i class="ph ph-spinner animate-spin"></i> Memuat...</div>
     </div>

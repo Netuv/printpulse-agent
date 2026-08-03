@@ -18,19 +18,72 @@ class IpcController {
     
     ipcMain.handle('login', async (e, { email, password, agent_label }) => {
       try {
+        // PIC base login (or layered when pic_agent_id linked — handled via layered-login)
         const res = await api.login(email, password, agent_label);
         realtime.connect();
+
+        if (res.is_layered && res.pic_user) {
+          // Shouldn't normally happen via this path, but keep safe
+          config.setLayeredUser({
+            id: res.user.id, email: res.user.email, nama: res.user.nama,
+            role: res.user.role, tenant_id: res.user.tenant_id,
+          });
+          if (res.idle_timeout_min) config.setIdleTimeout(res.idle_timeout_min);
+        } else {
+          // PIC base login
+          config.setPicSession(res.user, res.agent_id);
+          if (res.user && res.user.idle_timeout_min) config.setIdleTimeout(res.user.idle_timeout_min);
+          config.clearLayeredUser();
+        }
         return res;
       } catch (err) {
         throw new Error(err.error || err.message || 'Unknown error');
       }
     });
 
+    // Layered: admin/tech login above PIC (validates, returns info, keeps PIC token)
+    ipcMain.handle('layered-login', async (e, { email, password }) => {
+      try {
+        const picAgentId = config.get('pic_agent_id');
+        const res = await api.layeredLogin(email, password, picAgentId);
+        if (res.is_layered && res.pic_user) {
+          config.setLayeredUser({
+            id: res.user.id,
+            email: res.user.email,
+            nama: res.user.nama,
+            role: res.user.role,
+            tenant_id: res.user.tenant_id,
+          });
+          if (res.idle_timeout_min) config.setIdleTimeout(res.idle_timeout_min);
+        }
+        return res;
+      } catch (err) {
+        throw new Error(err.error || err.message || 'Unknown error');
+      }
+    });
+
+    // Logout layered (back to PIC) — no re-input of PIC credentials
+    ipcMain.handle('logout-layered', () => {
+      config.clearLayeredUser();
+      return { pic_user: config.get('pic_user') };
+    });
+
     ipcMain.handle('logout', () => {
       config.set('token', null);
       config.set('tenant_id', null);
+      config.clearLayeredUser();
       realtime.disconnect();
       return true;
+    });
+
+    ipcMain.handle('save-idle-timeout', async (e, minutes) => {
+      try {
+        const res = await api.saveIdleTimeout(minutes);
+        if (res && res.idle_timeout_min) config.setIdleTimeout(res.idle_timeout_min);
+        return res;
+      } catch (err) {
+        throw new Error(err.error || err.message || 'Unknown error');
+      }
     });
 
     ipcMain.handle('set-agent-label', async (e, label) => {

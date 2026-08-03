@@ -45,7 +45,7 @@ class ApiClient {
     return data;
   }
 
-  async login(email, password, agent_label) {
+  async login(email, password, agent_label, pic_agent_id) {
     const os = require('os');
     const config = require('./config');
     let version = '1.0.0';
@@ -59,12 +59,39 @@ class ApiClient {
       agent_version: version
     };
     if (agent_label) payload.agent_label = agent_label;
+    if (pic_agent_id) payload.pic_agent_id = pic_agent_id;
 
     const res = await this.request('POST', '/api/agent/login', payload);
-    config.set('token', res.access_token);
-    config.set('tenant_id', res.tenant_id);
-    if (res.agent_id) config.set('agent_id', res.agent_id);
+    // Layered login (admin/tech above PIC): do NOT overwrite the PIC token.
+    // Only PIC base login replaces the session token.
+    if (!res.is_layered) {
+      config.set('token', res.access_token);
+      config.set('tenant_id', res.tenant_id);
+      if (res.agent_id) config.set('agent_id', res.agent_id);
+    }
     if (agent_label) config.set('agent_label', agent_label);
+    return res;
+  }
+
+  /**
+   * Layered login: validate admin/tech credentials against the linked PIC
+   * agent without replacing the PIC session token/identity.
+   */
+  async layeredLogin(email, password, pic_agent_id) {
+    const os = require('os');
+    const config = require('./config');
+    let version = '1.0.0';
+    try { version = require('../../package.json').version; } catch(e){}
+
+    const payload = {
+      email, password,
+      agent_id: config.get('agent_id') || undefined,
+      hostname: os.hostname(),
+      agent_version: version,
+      pic_agent_id,
+    };
+    const res = await this.request('POST', '/api/agent/login', payload);
+    // Never overwrite token — this is a front layer only
     return res;
   }
 
@@ -95,6 +122,20 @@ class ApiClient {
 
   async deleteMesinActivity(mesinId, activityId) {
     return this.request('DELETE', `/api/mesin/${mesinId}/activity/${activityId}`);
+  }
+
+  // SYSTEM auto-log (bypasses PIC view-only gate) — used by alert auto-logging
+  async logDeviceActivity(payload) {
+    return this.request('POST', '/api/agent/device/activity', payload);
+  }
+
+  // ── Layered login (PIC + Admin/Technician front layer) ──
+  async getLoginState() {
+    return this.request('GET', '/api/agent/login-state');
+  }
+
+  async saveIdleTimeout(idleTimeoutMin) {
+    return this.request('PUT', '/api/agent/idle-timeout', { idle_timeout_min: idleTimeoutMin });
   }
   
   async sendHeartbeat(payload) {
