@@ -16,7 +16,7 @@ try {
 function send(title, message) {
   if (notifier) {
     try {
-      notifier.notify({ title, message, icon: __dirname + '/../icon.png' });
+      notifier.notify({ title, message, icon: __dirname + '/../assets/icon.png' });
     } catch {}
   }
   console.log(`[NOTIFY] ${title}: ${message}`);

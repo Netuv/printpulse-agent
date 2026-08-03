@@ -1,43 +1,49 @@
 {
   "name": "printpulse-agent",
-  "version": "1.0.1",
-  "description": "PrintPulse SNMP Agent - Network discovery and printer polling",
-  "main": "index.js",
+  "version": "2.0.0",
+  "description": "PrintPulse Agent - Desktop GUI for printer fleet monitoring",
+  "main": "src/main.js",
   "scripts": {
-    "setup": "node index.js setup",
-    "install": "node index.js install",
-    "start": "node index.js start",
-    "stop": "node index.js uninstall",
-    "status": "node index.js status",
-    "discover": "node index.js discover",
-    "poll": "node index.js poll",
-    "daemon": "node index.js daemon",
-    "build:win": "pkg index.js --targets node18-win-x64 --output dist/printpulse-agent.exe",
-    "build:mac": "pkg index.js --targets node18-macos-x64 --output dist/printpulse-agent-macos",
-    "build:linux": "pkg index.js --targets node18-linux-x64 --output dist/printpulse-agent-linux",
-    "build": "npm run build:win && npm run build:mac && npm run build:linux"
+    "start": "electron .",
+    "build:win": "electron-builder --win",
+    "build": "electron-builder -w"
   },
-  "keywords": ["snmp", "printer", "network-discovery", "monitoring"],
   "author": "PrintPulse Team",
   "license": "MIT",
   "dependencies": {
+    "commander": "^11.1.0",
     "net-snmp": "^3.11.2",
     "node-fetch": "^2.7.0",
-    "commander": "^11.1.0",
     "node-notifier": "^10.0.1"
   },
   "devDependencies": {
-    "pkg": "^5.8.1"
+    "electron": "^28.2.0",
+    "electron-builder": "^24.9.1"
+  },
+  "build": {
+    "appId": "com.printpulse.agent",
+    "productName": "PrintPulse Agent",
+    "asar": false,
+    "directories": {
+      "output": "dist_final"
+    },
+    "win": {
+      "target": ["nsis", "portable"],
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "files": [
+      "src/**/*",
+      "renderer/**/*",
+      "assets/**/*"
+    ]
   },
   "engines": {
     "node": ">=18.0.0"
-  },
-  "pkg": {
-    "assets": [
-      "src/**/*",
-      "node_modules/**/*"
-    ],
-    "targets": ["node18-win-x64", "node18-macos-x64", "node18-linux-x64"],
-    "outputPath": "dist"
   }
 }

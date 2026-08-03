@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PrintPulse Agent — Login</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="setup-body">
+  <div class="setup-card">
+    <div class="logo">PP</div>
+    <h1>PrintPulse Agent</h1>
+    <p class="subtitle">Sign in to your account</p>
+
+    <form id="login-form">
+      <div class="field">
+        <label>Email</label>
+        <input type="email" id="email" placeholder="admin@rental.com" required autofocus>
+      </div>
+      <div class="field">
+        <label>Password</label>
+        <input type="password" id="password" placeholder="Your password" required>
+      </div>
+
+      <div class="actions">
+        <button type="submit" class="btn-primary" id="btn-login" style="width:100%">Sign In</button>
+      </div>
+      <p id="status-msg" class="status-msg"></p>
+    </form>
+  </div>
+
+  <script>
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+      const status = document.getElementById('status-msg');
+      const btn = document.getElementById('btn-login');
+
+      status.className = 'status-msg';
+      status.textContent = 'Signing in...';
+      btn.disabled = true;
+      btn.textContent = 'Please wait...';
+
+      try {
+        // Call agent's /api/agent/login — agent forwards to backend
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        const data = await res.json();
+
+        if (!res.ok || !data.config) {
+          throw new Error(data.error || 'Login failed');
+        }
+
+        // Save config from server
+        const configSave = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data.config)
+        });
+        const saveResult = await configSave.json();
+        if (!saveResult.ok) throw new Error('Failed to save config');
+
+        // Notify agent to start
+        await fetch('/api/setup-complete', { method: 'POST' });
+
+        status.className = 'status-msg success';
+        status.textContent = '✅ Signed in! Opening dashboard...';
+        setTimeout(() => window.location.href = '/', 500);
+      } catch (err) {
+        status.className = 'status-msg error';
+        status.textContent = '❌ ' + err.message;
+        btn.disabled = false;
+        btn.textContent = 'Sign In';
+      }
+    });
+  </script>
+</body>
+</html>

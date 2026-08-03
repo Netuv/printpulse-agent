@@ -113,6 +113,27 @@ class ApiClient {
 
     await Promise.allSettled(updates);
   }
+
+  /**
+   * Submit device online/offline status
+   */
+  async submitStatus(mesinId, online) {
+    return this.request('PUT', `/api/mesin/${mesinId}/status`, { online });
+  }
+
+  /**
+   * Submit silent log data
+   */
+  async submitLogs(logData) {
+    return this.request('POST', '/api/agent/logs', logData).catch(() => {});
+  }
+
+  /**
+   * Track machines (apply configuration for discovery results)
+   */
+  async trackMachines(machineIds) {
+    return this.request('POST', '/api/mesin/track', { machine_ids: machineIds });
+  }
 }
 
 module.exports = ApiClient;
