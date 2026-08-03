@@ -735,7 +735,7 @@ app.registerView('dashboard', {
                           '<span class="font-mono text-gray-500">' + fmt(ud.scan.count||0) + ' <span class="text-gray-400">(info)</span></span></div>' : '';
                         html += '<div class="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3 border border-slate-100">' +
                           '<div class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1"><i class="ph ph-chart-bar"></i> Usage Breakdown</div>' +
-                          '<div class="text-[8px] text-gray-400 mb-1">' + (ud.source === 'ricoh_wim' ? 'Ricoh WIM' : ud.source === 'hp_usagepage' ? 'HP EWS' : ud.source) + '</div>' +
+                          '<div class="text-[8px] text-gray-400 mb-1">' + (ud.source === 'ricoh_wim' ? 'Ricoh WIM' : ud.source === 'hp_usagepage' ? 'HP EWS' : ud.source === 'amcs_m1m4' ? 'AMCS M1-M4 (SNMP)' : ud.source) + '</div>' +
                           rows.map(r => cell(r.key)).join('') + scanHtml + '</div>';
                       }
                       // Monthly delta: this month vs last month

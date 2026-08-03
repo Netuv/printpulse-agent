@@ -796,6 +796,30 @@ class PollerService {
           // Attach M1-M4 raw for downstream use
           pollResult.m1m4_raw = mVal;
           pollResult.m1m4_labels = labels;
+
+          // ── Map M1-M4 to per-function usage_detail (Xerox etc.) ──
+          // Labels convention: M1:Total, M2:Copy, M3:Print, M4:Fax (Xerox).
+          // Provide print/copy/fax breakdown when M1-M4 available.
+          if (!pollResult.usage_detail && mVal.length >= 4) {
+            const mk = (s) => { const v = mVal[s]; return (v !== null && !isNaN(v) && v > 0) ? v : 0; };
+            const m2 = mk(1), m3 = mk(2), m4 = mk(3); // copy, print, fax (Xerox order)
+            const fnTotal = m2 + m3 + m4;
+            // Color split unknown from M1-M4 alone — allocate proportionally to
+            // existing color counter if available, else all black.
+            const colorTotal = pollResult.color_counter || 0;
+            const bwTotal = pollResult.bw_counter || 0;
+            const grand = bwTotal + colorTotal;
+            const colorShare = (fnTotal > 0 && grand > 0) ? colorTotal / grand : 0;
+            const f = (v) => ({
+              bw: Math.round(v * (1 - colorShare)),
+              color: Math.round(v * colorShare),
+            });
+            pollResult.usage_detail = {
+              print: f(m3), copy: f(m2), fax: f(m4),
+              source: 'amcs_m1m4',
+            };
+            console.log(`   AMCS M1-M4 → usage_detail: print=${m3} copy=${m2} fax=${m4} (src=amcs_m1m4)`);
+          }
         }
       } catch (e) {
         console.log(`   AMCS M1-M4 override failed for ${ip}: ${e.message}`);
