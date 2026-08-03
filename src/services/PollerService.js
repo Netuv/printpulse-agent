@@ -385,9 +385,18 @@ class PollerService {
       console.log(`   ✅ Web scraper data prioritized for ${ip} (SKIP SNMP override)`);
     }
 
-    // Add data source metadata for UI
+    // Add data source metadata for UI — distinguish toner source vs usage source.
+    // A device can have web-scraped usage counters but SNMP toner (web UI needs login).
     result.data_source = result._dataSource || 'snmp';
     result.scraped_realtime = (result._dataSource === 'web_scraper');
+    // toner_source: where the displayed toner levels came from
+    const webTonerUsed = (webData && webData.status === 'ok' && webData.toner && webData.toner.length > 0 &&
+      result.toner_match_snmp === true) || (webData && webData.status === 'ok' && webData.toner && webData.toner.length > 0 &&
+      (!(snmpData && snmpData.toner) || (snmpData.toner || []).length === 0));
+    result.toner_source = webTonerUsed ? 'web' : 'snmp';
+    if (result.toner_source === 'snmp' && (result.toner || []).some(t => t.estimated)) {
+      result.toner_source = 'snmp_estimated';
+    }
 
     return result;
   }
@@ -827,6 +836,9 @@ class PollerService {
           // Match by POSITION (index), not by warna string — normalizeTonerWarna unreliable
           const target = pollResult.toner[idx];
           if (target) {
+            // Non-original chips (estimated) already have a page-count estimate.
+            // OID may return a misleading 100/full value — do NOT clobber the estimate.
+            if (target.estimated === true || target.estimated === 1) return;
             target.warna = colors[idx];        // Fix the color name
             target.level = val;
             target.level_sekarang = val;

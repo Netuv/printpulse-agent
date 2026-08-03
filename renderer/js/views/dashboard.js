@@ -606,8 +606,11 @@ app.registerView('dashboard', {
 
             const rawLv = t.level_sekarang;
             let displayLv = rawLv, isEst = false, estNote = '', isNonOrig = false;
+            // Non-original chip: agent may send estimated % (>=0) with estimated=true,
+            // or raw -2. Either way it's non-original → yellow highlight.
+            isNonOrig = (rawLv < 0) || (t.estimated === true || t.estimated === 1);
+
             if (rawLv < 0) {
-              isNonOrig = true;
               const isBlack = wl.includes('black')||wl.includes('k')||wl.includes('negro');
               let estPct = null;
               if (isBlack && m.meter_akhir_bw > 0 && yieldProfile.black > 0) {
@@ -618,6 +621,10 @@ app.registerView('dashboard', {
                 estNote = `${fmt(perColor)}/${fmt(yieldProfile.color)} hal. x${colorToners}`;
               } else { estPct = 50; estNote = 'Data tdk cukup'; }
               displayLv = estPct; isEst = true;
+            } else if (isNonOrig && t.estimated_from) {
+              // Agent-sent estimate — keep its % and show source note
+              isEst = true;
+              estNote = t.estimated_from;
             }
             estTonerHtml += `
               <div class="flex items-center gap-3 ${isEst?'border border-dashed border-yellow-400':''} rounded-lg p-2.5 ${isEst?'bg-yellow-50/50':'bg-slate-50/50'}">
@@ -805,7 +812,7 @@ app.registerView('dashboard', {
                     <div class="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3 border border-slate-100">
                       <div class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2 flex items-center justify-between">
                         <span><i class="ph ph-drop"></i> Toner</span>
-                        <span class="text-[8px] font-normal text-yellow-500">${m.toner?.some(t=>(t.level_sekarang||0)<0)?'Non-original chip detected':'OEM'}</span>
+                        <span class="text-[8px] font-normal text-yellow-500">${m.toner?.some(t=>(t.level_sekarang||0)<0 || t.estimated === true || t.estimated === 1)?'Non-original chip detected':'OEM'}</span>
                       </div>
                       ${m.toner&&m.toner.length?estTonerHtml:'<div class="text-[10px] text-gray-400 italic">No data</div>'}
                       <div class="mt-2 pt-2 border-t border-slate-200 text-[9px] text-gray-400">Yield: ${yieldProfile.black?fmt(yieldProfile.black)+' BW / '+fmt(yieldProfile.color)+' Color':'Generic'}</div>
