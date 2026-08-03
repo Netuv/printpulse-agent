@@ -159,6 +159,15 @@ class PollerService {
       if (r.status === 'fulfilled') syncPayload.devices.push(r.value);
     }
 
+    // DEBUG: log toner payload being sent to worker
+    if (process.env.PP_DEBUG) {
+      syncPayload.devices.forEach(d => {
+        if (d.toner && d.toner.length) {
+          console.log(`[Poller] SYNC toner ${d.ip}:`, d.toner.map(t => `${t.warna}=${t.level}${t.estimated ? '(est)' : ''}`).join(', '));
+        }
+      });
+    }
+
     config.set('tracked_devices', devices);
 
     if (this.offlineQueue.length > 0) {
@@ -293,10 +302,17 @@ class PollerService {
         const match = Object.keys(webTonerMap).every(c => 
           snmpTonerMap[c] !== undefined && Math.abs(snmpTonerMap[c] - webTonerMap[c]) <= 15
         );
-        result.toner = webData.toner;
-        result.toner_match_snmp = match;
-        result._dataSource = 'web_scraper';
-        console.log(`   ✅ Web scraper toner (${match ? 'MATCH SNMP' : 'web-realtime'}): ${webData.toner.map(t => t.warna + '=' + t.level + '%').join(', ')}`);
+        // Web toner wins ONLY if it matches SNMP (reliable cross-check) OR SNMP has no toner.
+        // If web differs wildly (e.g. Ricoh WIM parse artifact 75% vs SNMP 17%), keep SNMP —
+        // SNMP with estimation is more reliable for non-original chips.
+        if (match || snmpToner.length === 0) {
+          result.toner = webData.toner;
+          result.toner_match_snmp = match;
+          result._dataSource = 'web_scraper';
+          console.log(`   ✅ Web scraper toner (${match ? 'MATCH SNMP' : 'web-only'}): ${webData.toner.map(t => t.warna + '=' + t.level + '%').join(', ')}`);
+        } else {
+          console.log(`   ⚠️ Web toner SKIPPED (tidak match SNMP) — pertahankan SNMP: ${webData.toner.map(t => t.warna + '=' + t.level).join(', ')} vs SNMP ${snmpToner.map(t => t.warna + '=' + t.level).join(', ')}`);
+        }
       }
       if (webData.trays && webData.trays.length > 0) {
         result.paper_trays = webData.trays;
@@ -537,6 +553,9 @@ class PollerService {
     const COLOR_ORDER = ['BLACK','CYAN','MAGENTA','YELLOW'];
     const toner = COLOR_ORDER.map(c => rawToner.find(t => t.warna === c) || 
       rawToner.find(t => t.warna.includes(c)) || null).filter(Boolean);
+    if (process.env.PP_DEBUG) {
+      console.log(`[Poller] phased raw toner (${idPhase.vendor || '?'}):`, toner.map(t => `${t.warna}=${t.level} src=${(t.estimated_from||'')}`).join(' | '));
+    }
     // For synthetic toners: mark all as estimated so JS estimation engine fills real %
     // For prtMediumTable: real data but may need page-count refinement
     // estimateTonerLevels in snmpy-bridge will replace estimated ones
