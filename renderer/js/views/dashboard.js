@@ -313,6 +313,7 @@ app.registerView('dashboard', {
 
     this._submitLayeredLogin = async () => {
       const { ipcRenderer } = require('electron');
+      console.log('[Layered] _submitLayeredLogin dipanggil');
       const email = document.getElementById('layered-email').value.trim();
       const password = document.getElementById('layered-password').value;
       const timeout = parseInt(document.getElementById('layered-timeout').value) || 5;
@@ -326,6 +327,7 @@ app.registerView('dashboard', {
         }
         app.config = await ipcRenderer.invoke('get-config');
         app.closeModal();
+        console.log('[Layered] layered_user =', app.config.layered_user);
         this._renderLayeredState();
         app.toast('Login Teknisi/Admin berhasil. Idle logout: ' + (app.config.idle_timeout_min || 5) + ' menit.', 'success');
       } catch (err) {
