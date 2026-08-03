@@ -202,6 +202,9 @@ app.registerView('dashboard', {
         window.agentCanChangeSettings = this.canChangeSettings;
         this.userRole = layered.role;
         document.getElementById('user-role-display').textContent = layered.role;
+        // Show send-log for TEKNISI
+        const sendLogBtn = document.getElementById('btn-send-log');
+        if (sendLogBtn) sendLogBtn.classList.toggle('hidden', layered.role !== 'TEKNISI');
         this._startIdleTimer();
       } else {
         badge.classList.add('hidden');
@@ -213,8 +216,13 @@ app.registerView('dashboard', {
         window.agentCanChangeSettings = this.canChangeSettings;
         this.userRole = picRole;
         document.getElementById('user-role-display').textContent = picRole || 'AGENT';
+        const sendLogBtn = document.getElementById('btn-send-log');
+        if (sendLogBtn) sendLogBtn.classList.toggle('hidden', picRole !== 'TEKNISI');
         this._stopIdleTimer();
       }
+      // Re-render table so role-gated action buttons (SNMP, untrack, etc.) update immediately
+      if (typeof this.renderTable === 'function') this.renderTable();
+      if (typeof this.updateChart === 'function') this.updateChart();
     };
 
     this._stopIdleTimer = () => {
