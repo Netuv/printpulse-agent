@@ -44,8 +44,11 @@ class IpcController {
     // Layered: admin/tech login above PIC (validates, returns info, keeps PIC token)
     ipcMain.handle('layered-login', async (e, { email, password }) => {
       try {
-        const picAgentId = config.get('pic_agent_id');
+        // Fallback: if pic_agent_id not set (pre-update PIC login), use agent_id
+        const picAgentId = config.get('pic_agent_id') || config.get('agent_id');
+        console.log('[Layered] pic_agent_id =', picAgentId);
         const res = await api.layeredLogin(email, password, picAgentId);
+        console.log('[Layered] login res is_layered =', res.is_layered, 'pic_user =', res.pic_user ? res.pic_user.nama : null);
         if (res.is_layered && res.pic_user) {
           config.setLayeredUser({
             id: res.user.id,
@@ -55,6 +58,9 @@ class IpcController {
             tenant_id: res.user.tenant_id,
           });
           if (res.idle_timeout_min) config.setIdleTimeout(res.idle_timeout_min);
+        } else {
+          // Not layered — likely pic_agent_id mismatch. Surface clear error.
+          throw new Error('Login Teknisi/Admin gagal: akun PIC tidak terhubung. Silakan logout lalu login ulang dengan akun PIC terlebih dahulu.');
         }
         return res;
       } catch (err) {
