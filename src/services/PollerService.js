@@ -353,6 +353,11 @@ class PollerService {
         result.alerts.critical = webData.alerts.filter(a => a.severity === 'critical' || a.severity >= 8).length;
         result.alerts.warnings = webData.alerts.filter(a => a.severity === 'warning' || (a.severity >= 4 && a.severity < 8)).length;
       }
+      // Job log from web (Layer 2 full crawl)
+      if (webData.jobs && webData.jobs.length > 0) {
+        result.jobs = webData.jobs;
+        result._dataSource = result._dataSource || 'web_scraper';
+      }
       if (webData.statusText) {
         result.web_status = webData.statusText;
       }
@@ -1143,19 +1148,45 @@ class PollerService {
       gotAny = true;
     }
 
-    // ── LAYER 2: Auto-discovery — crawl root, find keyword pages, verify ──
-    // Jika semua path known gagal, crawl http://IP, extract semua link,
-    // cari page yang mengandung keyword data yang dibutuhkan, verifikasi,
-    // baru pakai.
-    if (!gotAny) {
+    // ── LAYER 2 FULL: Auto-discovery — crawl ALL pages, fill gaps, leave nothing behind ──
+    // Runs as a complement when there are gaps, or periodically (every 6h) to
+    // catch new detail pages. Not every poll — full crawl is expensive (40 pages).
+    const now = Date.now();
+    const lastL2 = (dev && dev._layer2At) || 0;
+    const hasGap = !result.toner || result.toner.length === 0 ||
+      !result.trays || result.trays.length === 0 ||
+      !result.usage || Object.keys(result.usage).length === 0;
+    if (hasGap || (now - lastL2) > 6 * 3600 * 1000) {
+      if (dev) dev._layer2At = now;
       const discovered = await this.discoverWebPaths(ip, dev, authHeader);
       if (discovered) {
-        if (discovered.toner && discovered.toner.length > 0) { result.toner = discovered.toner; gotAny = true; }
-        if (discovered.trays && discovered.trays.length > 0) { result.trays = discovered.trays; gotAny = true; }
-        if (discovered.usage && Object.keys(discovered.usage).length > 0) { result.usage = discovered.usage; gotAny = true; }
-        if (discovered.deviceInfo && Object.keys(discovered.deviceInfo).length > 0) { result.deviceInfo = discovered.deviceInfo; gotAny = true; }
-        if (discovered.alerts && discovered.alerts.length > 0) { result.alerts = discovered.alerts; gotAny = true; }
-        if (gotAny) console.log(`   🔍 Layer2 auto-discovery found data for ${ip}`);
+        // Fill gaps only — prefer richer data, never replace real known-path data
+        if (!result.toner || result.toner.length === 0) {
+          if (discovered.toner && discovered.toner.length > 0) { result.toner = discovered.toner; gotAny = true; }
+        }
+        if (!result.trays || result.trays.length === 0) {
+          if (discovered.trays && discovered.trays.length > 0) { result.trays = discovered.trays; gotAny = true; }
+        }
+        if (!result.usage || Object.keys(result.usage).length === 0) {
+          if (discovered.usage && Object.keys(discovered.usage).length > 0) {
+            result.usage = discovered.usage;
+            if (discovered.usage_detail) result.usage_detail = discovered.usage_detail;
+            gotAny = true;
+          }
+        }
+        if (!result.deviceInfo || Object.keys(result.deviceInfo).length === 0) {
+          if (discovered.deviceInfo && Object.keys(discovered.deviceInfo).length > 0) { result.deviceInfo = discovered.deviceInfo; gotAny = true; }
+        }
+        // Alerts & jobs always merge (Layer 2 may find pages known paths miss)
+        if (discovered.alerts && discovered.alerts.length > 0) {
+          result.alerts = (result.alerts || []).concat(discovered.alerts);
+          gotAny = true;
+        }
+        if (discovered.jobs && discovered.jobs.length > 0) {
+          result.jobs = discovered.jobs;
+          gotAny = true;
+        }
+        if (gotAny) console.log(`   🔍 Layer2 full auto-discovery enriched data for ${ip}`);
       }
     }
 
@@ -1311,93 +1342,135 @@ class PollerService {
   }
 
   /**
-   * LAYER 2: Auto-discovery web paths
-   * 1. Crawl http://IP root page
-   * 2. Extract all internal links (htm/cgi/xml/json)
-   * 3. Fetch each candidate page (limited set)
-   * 4. Parse with all parsers, verify data is real, collect
+   * Parse job log HTML (HP EWS JobLog, generic tables)
+   * Returns [{ name, user, pages, status }]
+   */
+  parseJobLogHTML(html) {
+    if (!html) return [];
+    const jobs = [];
+    // HP: table rows with job name / user / pages
+    // Look for JobLog tables — rows like <td>Report.pdf</td><td>user</td><td>12</td>
+    const table = html.match(/<(?:table|tbody)[^>]*>([\s\S]*?)<\/(?:table|tbody)>/i);
+    if (!table) return [];
+    const rows = table[1].match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
+    rows.forEach((row, ri) => {
+      if (ri === 0) return; // skip header
+      const cells = (row.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [])
+        .map(c => c.replace(/<[^>]+>/g, '').trim());
+      if (cells.length >= 2) {
+        const name = cells[0];
+        if (!name || /^(job|status|name|user)/i.test(name) || name.length > 120) return;
+        // pages = cell containing a number, user = cell with @ or letters
+        const numCell = cells.find(c => /^\d{1,6}$/.test(c));
+        const pages = numCell ? parseInt(numCell) : (cells.length >= 3 ? parseInt(cells[2]) || 0 : 0);
+        const user = cells.length >= 3 ? cells[1] : '';
+        // Avoid duplicates / non-jobs
+        if (name.length > 2 && !name.includes('Copyright')) {
+          jobs.push({ name, user: user || '', pages: pages || 0, status: cells[cells.length - 1] || '' });
+        }
+      }
+    });
+    return jobs.slice(0, 15);
+  }
+
+  /**
+   * LAYER 2 FULL: Auto-discovery web paths — crawl ALL internal pages
+   * 1. Crawl http(s)://IP root page
+   * 2. Extract ALL internal links (htm/cgi/xml/json)
+   * 3. Fetch EVERY candidate page (deduped, depth-guarded) — no 15-link limit
+   * 4. Parse with all parsers; collect the BEST (most complete) data per field
+   * 5. Recurse 1 level for richer pages (nav menus point to detail pages)
+   * Goal: leave no data behind — toner, trays, usage, jobs, alerts, device info.
    */
   async discoverWebPaths(ip, dev, authHeader) {
-    const found = { toner: [], trays: [], usage: {}, deviceInfo: {}, alerts: [] };
+    const found = { toner: [], trays: [], usage: {}, usage_detail: null, deviceInfo: {}, alerts: [], jobs: [] };
     const ssl = (dev && dev.web_ssl) || false;
+    const MAX_PAGES = 40;           // hard cap to avoid flooding (was 15)
+    const visited = new Set();      // page paths already fetched
+
+    const fetchAndParse = async (proto, path) => {
+      if (visited.has(path) || visited.size >= MAX_PAGES) return;
+      visited.add(path);
+      const page = await this._httpFetchRaw(proto, ip, path, authHeader);
+      if (page.status !== 'ok') return;
+      const h = page.html;
+      if (!h || h.length < 100) return;
+      this.tryParsePage(h, path, found, proto, ip, authHeader, fetchAndParse);
+    };
 
     for (const proto of ['http', 'https']) {
       // Step 1: fetch root
       const root = await this._httpFetchRaw(proto, ip, '', authHeader);
       if (root.status !== 'ok' || root.html.length < 50) continue;
-      // If root is binary (not HTML), try probing known paths directly
       const looksHtml = /<html|<head|<body|<title/i.test(root.html);
       if (!looksHtml) {
-        console.log(`   🔍 Layer2: ${proto} root binary/compressed — probing known paths for ${ip}`);
+        // Binary/compressed root — probe known paths directly
+        console.log(`   🔍 Layer2: ${proto} root binary — probing known paths for ${ip}`);
         const known = ['/hp/device/DeviceStatus/Index', '/SSI/supply_status_info.htm', 'stsply.htm',
           '/web/guest/en/websys/status/getUnificationCounter.cgi', '/general/status.html', '/wcd/top.xml',
           '/sws/app/information/home/home.json'];
-        for (const kp of known) {
-          const page = await this._httpFetchRaw(proto, ip, kp, authHeader);
-          if (page.status !== 'ok') continue;
-          const h = page.html;
-          if (!h || h.length < 100) continue;
-          this.tryParsePage(h, kp, found);
-        }
-        if (found.toner.length > 0 || found.trays.length > 0 || Object.keys(found.usage).length > 0) break;
-        continue;
+        for (const kp of known) await fetchAndParse(proto, kp);
+        break;
       }
 
-      // Step 2: extract links
+      // Step 2: extract ALL links (no 15 limit — full crawl)
       const links = this.extractInternalLinks(root.html, ip);
       console.log(`   🔍 Layer2: ${proto} root → ${links.length} candidate link(s) for ${ip}`);
-      if (links.length === 0) continue;
 
-      // Step 3: fetch + parse each candidate (limit to 15 to avoid flooding)
-      const candidates = links.slice(0, 15);
-      for (const link of candidates) {
-        const page = await this._httpFetchRaw(proto, ip, link, authHeader);
-        if (page.status !== 'ok') continue;
-        const h = page.html;
-        if (!h || h.length < 100) continue;
-        this.tryParsePage(h, link, found);
-      }
+      // Step 3: fetch + parse EVERY candidate (deduped, capped at MAX_PAGES).
+      // If root exposes no links (frames/login), still probe known vendor paths.
+      const toCrawl = links.length > 0 ? links : ['stsply.htm', 'prcnt.htm', 'sttray.htm', 'stgen.htm',
+        '/hp/device/DeviceStatus/Index', '/SSI/supply_status_info.htm', '/general/status.html',
+        '/web/guest/en/websys/status/getUnificationCounter.cgi', '/wcd/top.xml',
+        '/sws/app/information/home/home.json'];
+      for (const link of toCrawl) await fetchAndParse(proto, link);
 
-      if (found.toner.length > 0 || found.trays.length > 0 || Object.keys(found.usage).length > 0) break;
+      // Continue to next protocol to maximize coverage (don't break early)
+    }
+
+    // Dedupe/order: pick most-complete toner set if multiple pages gave toner
+    if (found.toner.length > 0) {
+      // Prefer 4-color complete sets over partial
+      const full = found.toner.filter(t => t.warna);
+      if (full.length >= 4) found.toner = full.slice(0, 4);
+      console.log(`   🔍 Layer2 final toner (${ip}): ${found.toner.map(x => x.warna + '=' + x.level).join(', ')}`);
     }
 
     return found;
   }
 
   /**
-   * Parse a page with all parsers and collect into found
+   * Parse a page with all parsers and collect into found.
+   * Prefers the MOST COMPLETE data per field (does not overwrite a fuller set).
+   * Also recurses 1 level: pages found in nav menus often point to detail pages.
    */
-  tryParsePage(h, link, found) {
-    // Toner detection
-    if (found.toner.length === 0) {
-      const t = this.parseConsumableHTML(h);
-      if (t && t.toner.length > 0) {
-        const plausible = t.toner.every(x => x.level >= 0 && x.level <= 100);
-        if (plausible) {
-          found.toner = t.toner;
-          console.log(`   🔍 Layer2 toner found @ ${link}: ${t.toner.map(x => x.warna + '=' + x.level + '%').join(', ')}`);
-        }
+  async tryParsePage(h, link, found, proto, ip, authHeader, fetchAndParse) {
+    // Toner detection — prefer complete sets (>=3 colors) over partial
+    const t = this.parseConsumableHTML(h);
+    if (t && t.toner.length > 0) {
+      const plausible = t.toner.every(x => x.level >= 0 && x.level <= 100);
+      if (plausible && t.toner.length > found.toner.length) {
+        found.toner = t.toner;
+        console.log(`   🔍 Layer2 toner @ ${link}: ${t.toner.map(x => x.warna + '=' + x.level + '%').join(', ')}`);
       }
     }
 
-    // Tray detection
-    if (found.trays.length === 0) {
-      const t = this.parseTrayHTML(h);
-      if (t && t.length > 0) {
-        const plausible = t.every(x => x.percentage === null || (x.percentage >= 0 && x.percentage <= 100));
-        if (plausible) {
-          found.trays = t;
-          console.log(`   🔍 Layer2 trays found @ ${link}: ${t.length} tray(s)`);
-        }
+    // Tray detection — prefer more trays
+    const tray = this.parseTrayHTML(h);
+    if (tray && tray.length > 0) {
+      const plausible = tray.every(x => x.percentage === null || (x.percentage >= 0 && x.percentage <= 100));
+      if (plausible && tray.length >= found.trays.length) {
+        found.trays = tray;
+        console.log(`   🔍 Layer2 trays @ ${link}: ${tray.length} tray(s)`);
       }
     }
 
-    // Usage detection
+    // Usage detection — prefer more counters
     if (Object.keys(found.usage).length === 0) {
       const u = this.parseUsageCountersHTML(h);
       if (Object.keys(u).length > 0) {
         found.usage = u;
-        console.log(`   🔍 Layer2 usage found @ ${link}: ${Object.keys(u).length} counter(s)`);
+        console.log(`   🔍 Layer2 usage @ ${link}: ${Object.keys(u).length} counter(s)`);
       }
       // Ricoh-style
       if (Object.keys(found.usage).length === 0 && (h.includes('Full Color') || h.includes('Black &amp; White'))) {
@@ -1405,7 +1478,16 @@ class PollerService {
         if (r.usage && Object.keys(r.usage).length > 0) {
           found.usage = r.usage;
           found.usage_detail = r.detail;
-          console.log(`   🔍 Layer2 Ricoh usage found @ ${link}`);
+          console.log(`   🔍 Layer2 Ricoh usage @ ${link}`);
+        }
+      }
+      // HP EquivalentImpressions
+      if (Object.keys(found.usage).length === 0 && h.includes('EquivalentImpressions')) {
+        const r = this.parseHPUsageCounters(h);
+        if (r.usage && Object.keys(r.usage).length > 0) {
+          found.usage = r.usage;
+          found.usage_detail = r.detail;
+          console.log(`   🔍 Layer2 HP usage @ ${link}`);
         }
       }
     }
@@ -1415,17 +1497,34 @@ class PollerService {
       const d = this.parseDeviceInfoHTML(h);
       if (d && (d.serial_number || d.model || d.location)) {
         found.deviceInfo = d;
-        console.log(`   🔍 Layer2 deviceInfo found @ ${link}`);
+        console.log(`   🔍 Layer2 deviceInfo @ ${link}`);
       }
     }
 
-    // Alerts
-    if (found.alerts.length === 0) {
-      const a = this.parseAlertsHTML(h);
-      if (a && a.length > 0) {
-        found.alerts = a;
-        console.log(`   🔍 Layer2 alerts found @ ${link}: ${a.length} alert(s)`);
+    // Alerts — merge (dedupe by text)
+    const a = this.parseAlertsHTML(h);
+    if (a && a.length > 0) {
+      const have = new Set(found.alerts.map(x => x.text));
+      const fresh = a.filter(x => !have.has(x.text));
+      if (fresh.length > 0) {
+        found.alerts = found.alerts.concat(fresh).slice(0, 20);
+        console.log(`   🔍 Layer2 alerts @ ${link}: +${fresh.length} alert(s)`);
       }
+    }
+
+    // Job log (HP /hp/device/InternalPages/Index?id=JobLog etc.)
+    if (found.jobs.length === 0) {
+      const j = this.parseJobLogHTML(h);
+      if (j && j.length > 0) {
+        found.jobs = j;
+        console.log(`   🔍 Layer2 jobs @ ${link}: ${j.length} job(s)`);
+      }
+    }
+
+    // Recurse 1 level: fetch links from this page (nav → detail pages)
+    if (fetchAndParse) {
+      const subLinks = this.extractInternalLinks(h, ip);
+      for (const sl of subLinks) await fetchAndParse(proto, sl);
     }
   }
 
