@@ -546,7 +546,8 @@ class PollerService {
     // page counts ÷ yield, so worker/frontend gets a REAL number instead
     // of a stale 0/100. Matches the UI-side estimator.
     const hasUnknown = toner.some(t => t.level === -2);
-    if (hasUnknown && (bwVal > 0 || colorVal > 0)) {
+    const totalPages = bwVal + colorVal;
+    if (hasUnknown && (bwVal > 0 || colorVal > 0 || totalPages > 0)) {
       const vendor = (idPhase.vendor || '').toLowerCase();
       const model = (idPhase.model || '').toLowerCase();
       const yields = this._yieldProfiles || {};
@@ -566,6 +567,12 @@ class PollerService {
         } else if (!isBlack && perColor > 0 && profile.color > 0) {
           estPct = Math.max(0, Math.min(100, Math.round(100 - (perColor / profile.color) * 100)));
           note = `Est. color ÷${colorCount} (${perColor}/${profile.color})`;
+        } else if (totalPages > 0) {
+          // Fallback: total pages split across toners
+          const perToner = Math.round(totalPages / Math.max(toner.length, 1));
+          const cap = (profile.black || 8000);
+          estPct = Math.max(0, Math.min(100, Math.round(100 - (perToner / cap) * 100)));
+          note = `Est. total ÷${toner.length} (${perToner}/${cap})`;
         }
         if (estPct !== null) {
           t.level = estPct;
