@@ -298,7 +298,9 @@ class PollerService {
     if (webData && webData.status === 'ok') {
       // Web scraping succeeded (anonymous or with creds)
       if (webData.toner && webData.toner.length > 0) {
-        // Compare with SNMP toner — if match, trust web (real-time accurate)
+        // WEB IS THE PRIORITY SOURCE — it reads the printer's own web UI
+        // (real-time, per-vendor accurate). SNMP is only a fallback when
+        // the web UI needs login / has no consumables page.
         const snmpToner = snmpData && snmpData.toner ? snmpData.toner : [];
         const webTonerMap = {};
         webData.toner.forEach(t => { webTonerMap[t.warna] = t.level; });
@@ -307,17 +309,10 @@ class PollerService {
         const match = Object.keys(webTonerMap).every(c => 
           snmpTonerMap[c] !== undefined && Math.abs(snmpTonerMap[c] - webTonerMap[c]) <= 15
         );
-        // Web toner wins ONLY if it matches SNMP (reliable cross-check) OR SNMP has no toner.
-        // If web differs wildly (e.g. Ricoh WIM parse artifact 75% vs SNMP 17%), keep SNMP —
-        // SNMP with estimation is more reliable for non-original chips.
-        if (match || snmpToner.length === 0) {
-          result.toner = webData.toner;
-          result.toner_match_snmp = match;
-          result._dataSource = 'web_scraper';
-          console.log(`   ✅ Web scraper toner (${match ? 'MATCH SNMP' : 'web-only'}): ${webData.toner.map(t => t.warna + '=' + t.level + '%').join(', ')}`);
-        } else {
-          console.log(`   ⚠️ Web toner SKIPPED (tidak match SNMP) — pertahankan SNMP: ${webData.toner.map(t => t.warna + '=' + t.level).join(', ')} vs SNMP ${snmpToner.map(t => t.warna + '=' + t.level).join(', ')}`);
-        }
+        result.toner = webData.toner;
+        result.toner_match_snmp = match;
+        result._dataSource = 'web_scraper';
+        console.log(`   ✅ Web scraper toner WINS (${match ? 'MATCH SNMP' : 'web-realtime'}): ${webData.toner.map(t => t.warna + '=' + t.level + '%').join(', ')}`);
       }
       if (webData.trays && webData.trays.length > 0) {
         result.paper_trays = webData.trays;
@@ -389,12 +384,11 @@ class PollerService {
     // A device can have web-scraped usage counters but SNMP toner (web UI needs login).
     result.data_source = result._dataSource || 'snmp';
     result.scraped_realtime = (result._dataSource === 'web_scraper');
-    // toner_source: where the displayed toner levels came from
-    const webTonerUsed = (webData && webData.status === 'ok' && webData.toner && webData.toner.length > 0 &&
-      result.toner_match_snmp === true) || (webData && webData.status === 'ok' && webData.toner && webData.toner.length > 0 &&
-      (!(snmpData && snmpData.toner) || (snmpData.toner || []).length === 0));
+    // toner_source: where the displayed toner levels came from.
+    // Web is the priority — if web returned toner, toner came from web.
+    const webTonerUsed = !!(webData && webData.status === 'ok' && webData.toner && webData.toner.length > 0);
     result.toner_source = webTonerUsed ? 'web' : 'snmp';
-    if (result.toner_source === 'snmp' && (result.toner || []).some(t => t.estimated)) {
+    if (!webTonerUsed && (result.toner || []).some(t => t.estimated)) {
       result.toner_source = 'snmp_estimated';
     }
 
