@@ -1303,7 +1303,13 @@ class PollerService {
       items.forEach(item => {
         const parts = item.replace(/\[|\]/g, '').split(',').map(s => s.trim().replace(/^'|'$/g, ''));
         if (parts.length >= 3 && parts[1] !== '0') {
-          alerts.push({ severity: parseInt(parts[1]) || 1, code: parts[2], text: parts[3] || '' });
+          const text = parts[3] || '';
+          // Skip noise: field labels, generic nav labels, empty texts
+          const noise = /^(description|management|field service|status code|system|device|menu|home)$/i.test(text) ||
+            text.length === 0 || text.length > 200;
+          if (!noise) {
+            alerts.push({ severity: parseInt(parts[1]) || 1, code: parts[2], text });
+          }
         }
       });
     }
