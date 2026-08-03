@@ -604,13 +604,15 @@ app.registerView('dashboard', {
             else if (wl.includes('yellow')) { bg = 'bg-yellow-400'; txtClr = 'text-yellow-600'; }
             else if (wl.includes('black')) { bg = 'bg-slate-800'; txtClr = 'text-slate-800'; }
 
-            const rawLv = t.level_sekarang;
-            let displayLv = rawLv, isEst = false, estNote = '', isNonOrig = false;
+            // level_sekarang may be absent on partial poll data — fallback to level
+            const rawLv = (t.level_sekarang !== undefined && t.level_sekarang !== null) ? t.level_sekarang : t.level;
+            let displayLv = (rawLv !== undefined && rawLv !== null) ? rawLv : -2;
+            let isEst = false, estNote = '', isNonOrig = false;
             // Non-original chip: agent may send estimated % (>=0) with estimated=true,
             // or raw -2. Either way it's non-original → yellow highlight.
             isNonOrig = (rawLv < 0) || (t.estimated === true || t.estimated === 1);
 
-            if (rawLv < 0) {
+            if (rawLv === undefined || rawLv === null || rawLv < 0) {
               const isBlack = wl.includes('black')||wl.includes('k')||wl.includes('negro');
               let estPct = null;
               if (isBlack && m.meter_akhir_bw > 0 && yieldProfile.black > 0) {
