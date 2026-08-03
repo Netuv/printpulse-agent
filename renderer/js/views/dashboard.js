@@ -760,10 +760,20 @@ app.registerView('dashboard', {
                           '<span class="font-mono font-semibold ' + scanCls + ' w-14 text-right">' + fmtD(scanD) + '</span></span></div>' +
                           '</div>';
                       }
-                      // Activity history button
-                      html += '<button onclick="window.showActivityModal(' + id + ')" class="w-full flex items-center justify-between bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg px-3 py-2.5 border border-indigo-100 transition-colors">' +
-                        '<span class="text-xs font-medium"><i class="ph ph-clock-counter-clockwise"></i> Riwayat Aktifitas Mesin</span>' +
+                      // Activity history buttons — separated: Alert history vs Teknisi activity
+                      const isPic = (app.config.pic_user && app.config.pic_user.role === 'AGENT') || !window.agentCanChangeSettings;
+                      html += '<div class="flex flex-col gap-1.5">';
+                      // History Alert Mesin — everyone can view, immutable
+                      html += '<button onclick="window.showAlertHistoryModal(' + id + ')" class="w-full flex items-center justify-between bg-red-50 hover:bg-red-100 text-red-700 rounded-lg px-3 py-2.5 border border-red-100 transition-colors">' +
+                        '<span class="text-xs font-medium"><i class="ph ph-bell-ringing"></i> History Alert Mesin</span>' +
                         '<i class="ph ph-caret-right"></i></button>';
+                      // Riwayat Aktifitas Teknisi — hidden for PIC
+                      if (!isPic) {
+                        html += '<button onclick="window.showTeknisiActivityModal(' + id + ')" class="w-full flex items-center justify-between bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg px-3 py-2.5 border border-indigo-100 transition-colors">' +
+                          '<span class="text-xs font-medium"><i class="ph ph-clock-counter-clockwise"></i> Riwayat Aktifitas Teknisi</span>' +
+                          '<i class="ph ph-caret-right"></i></button>';
+                      }
+                      html += '</div>';
                       return html;
                     })()}
                     <div class="flex items-center gap-2 text-xs text-gray-600 bg-indigo-50/50 rounded-lg px-3 py-2 border border-indigo-100"><i class="ph ph-user text-indigo-500"></i><span class="font-medium text-indigo-700">${m.kontrak?.pelanggan_nama||m.pelanggan_nama||'-'}</span></div>
@@ -993,10 +1003,57 @@ window.openWebUI = (ip) => {
   });
 };
 
-// ── Riwayat Aktifitas Mesin modal (agent) ──
-window.showActivityModal = async (mesinId) => {
+// ── History Alert Mesin modal (agent) — immutable, 3 months ──
+window.showAlertHistoryModal = async (mesinId) => {
   const { ipcRenderer } = require('electron');
-  const dev = (app.config.tracked_devices || []).find(d => Number(d.id) === Number(mesinId));
+  app.openModal(`<div class="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm"><div class="bg-white dark:bg-slate-800 rounded-xl shadow-2xl w-full max-w-lg mx-4 max-h-[85vh] flex flex-col overflow-hidden">
+    <div class="flex items-center justify-between px-5 py-3 border-b border-slate-100 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/50">
+      <div class="flex items-center gap-2"><i class="ph ph-bell-ringing text-red-500 text-lg"></i><h3 class="text-sm font-bold text-slate-800 dark:text-white">History Alert Mesin</h3></div>
+      <button onclick="app.closeModal()" class="w-7 h-7 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 text-slate-500 flex items-center justify-center transition-colors">&times;</button>
+    </div>
+    <div class="px-4 py-2 border-b border-slate-100 dark:border-slate-700 bg-red-50/50 dark:bg-red-900/10 text-[10px] text-red-600 dark:text-red-400 flex items-center gap-1.5">
+      <i class="ph ph-lock"></i> Riwayat alert otomatis dari mesin. 3 bulan terakhir. Tidak dapat dihapus.
+    </div>
+    <div id="alert-history-list" class="flex-1 overflow-y-auto p-3 space-y-2 bg-slate-50 dark:bg-slate-900">
+      <div class="text-center text-xs text-slate-400 py-6"><i class="ph ph-spinner animate-spin"></i> Memuat...</div>
+    </div>
+  </div></div>`);
+  await window.refreshAlertHistory(mesinId);
+};
+
+window.refreshAlertHistory = async (mesinId) => {
+  const { ipcRenderer } = require('electron');
+  const listEl = document.getElementById('alert-history-list');
+  if (!listEl) return;
+  try {
+    const res = await ipcRenderer.invoke('get-mesin-activity', mesinId, 200, 'alert', 90);
+    const items = (res && res.activity) || [];
+    if (!items.length) {
+      listEl.innerHTML = '<div class="text-center text-xs text-slate-400 py-8"><i class="ph ph-bell-ringing"></i> Belum ada alert mesin</div>';
+      return;
+    }
+    listEl.innerHTML = items.map(a => {
+      const dt = a.tgl_aktivitas ? new Date(a.tgl_aktivitas).toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'}) : '';
+      const isClear = /clear/i.test(a.deskripsi || '');
+      const sevMatch = (a.deskripsi || '').match(/severity (\d+)/);
+      const sev = sevMatch ? parseInt(sevMatch[1]) : 0;
+      const sevCls = sev >= 8 ? 'bg-red-100 text-red-700' : sev >= 4 ? 'bg-orange-100 text-orange-700' : 'bg-yellow-100 text-yellow-700';
+      return '<div class="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-3 ' + (isClear ? 'border-green-200 dark:border-green-800' : '') + '">' +
+        '<div class="flex items-center gap-1.5 mb-1">' +
+        '<span class="px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wide ' + (isClear ? 'bg-green-100 text-green-700' : sevCls) + '">' + (isClear ? 'CLEAR' : 'ALERT') + '</span>' +
+        '<span class="ml-auto text-[9px] text-slate-400">' + dt + '</span>' +
+        '</div>' +
+        '<div class="text-xs text-slate-700 dark:text-slate-300">' + (a.deskripsi||'') + '</div>' +
+        '</div>';
+    }).join('');
+  } catch (err) {
+    listEl.innerHTML = '<div class="text-center text-xs text-red-500 py-6">Gagal memuat: ' + (err.message || err) + '</div>';
+  }
+};
+
+// ── Riwayat Aktifitas Teknisi modal (agent) — hidden for PIC, editable by admin/tech ──
+window.showTeknisiActivityModal = async (mesinId) => {
+  const { ipcRenderer } = require('electron');
   const canEdit = !!window.agentCanChangeSettings;
   const formHtml = canEdit ? `
     <div class="p-4 border-b border-slate-100 dark:border-slate-700 space-y-2 bg-white dark:bg-slate-800">
@@ -1004,8 +1061,7 @@ window.showActivityModal = async (mesinId) => {
         <div><label class="text-[10px] font-medium text-slate-500">Jenis Aktifitas</label>
           <select id="act-type" class="w-full mt-0.5 px-2 py-1.5 border border-slate-200 dark:border-slate-600 rounded-lg text-xs bg-white dark:bg-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none">
             <option value="SERVICE">Service</option><option value="PERBAIKAN">Perbaikan</option>
-            <option value="PARTS">Ganti Parts</option><option value="MONITORING">Monitoring</option>
-            <option value="LAINNYA">Lainnya</option>
+            <option value="PARTS">Ganti Parts</option><option value="LAINNYA">Lainnya</option>
           </select></div>
         <div><label class="text-[10px] font-medium text-slate-500">Status</label>
           <select id="act-status" class="w-full mt-0.5 px-2 py-1.5 border border-slate-200 dark:border-slate-600 rounded-lg text-xs bg-white dark:bg-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none">
@@ -1022,14 +1078,11 @@ window.showActivityModal = async (mesinId) => {
           <input id="act-tgl" type="date" value="${new Date().toISOString().slice(0,10)}" class="w-full mt-0.5 px-2 py-1.5 border border-slate-200 dark:border-slate-600 rounded-lg text-xs bg-white dark:bg-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"></div>
       </div>
       <button id="act-save" onclick="window.saveActivity(${mesinId})" class="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium rounded-lg transition-colors">Tambah Aktifitas</button>
-    </div>` : `
-    <div class="px-4 py-2.5 border-b border-slate-100 dark:border-slate-700 bg-amber-50/50 dark:bg-amber-900/10 text-[11px] text-amber-700 dark:text-amber-400 flex items-center gap-1.5">
-      <i class="ph ph-info"></i> Akun PIC hanya bisa melihat. Login Teknisi/Admin untuk menambah atau mengedit aktifitas.
-    </div>`;
+    </div>` : '';
 
   app.openModal(`<div class="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm"><div class="bg-white dark:bg-slate-800 rounded-xl shadow-2xl w-full max-w-lg mx-4 max-h-[85vh] flex flex-col overflow-hidden">
     <div class="flex items-center justify-between px-5 py-3 border-b border-slate-100 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/50">
-      <div class="flex items-center gap-2"><i class="ph ph-clock-counter-clockwise text-indigo-600 text-lg"></i><h3 class="text-sm font-bold text-slate-800 dark:text-white">Riwayat Aktifitas Mesin</h3></div>
+      <div class="flex items-center gap-2"><i class="ph ph-clock-counter-clockwise text-indigo-600 text-lg"></i><h3 class="text-sm font-bold text-slate-800 dark:text-white">Riwayat Aktifitas Teknisi</h3></div>
       <button onclick="app.closeModal()" class="w-7 h-7 rounded-full bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 text-slate-500 flex items-center justify-center transition-colors">&times;</button>
     </div>
     ${formHtml}
@@ -1038,22 +1091,22 @@ window.showActivityModal = async (mesinId) => {
     </div>
   </div></div>`);
 
-  await window.refreshActivityList(mesinId);
+  await window.refreshTeknisiList(mesinId);
 };
 
-window.refreshActivityList = async (mesinId) => {
+window.refreshTeknisiList = async (mesinId) => {
   const { ipcRenderer } = require('electron');
   const listEl = document.getElementById('act-list');
   if (!listEl) return;
   try {
-    const res = await ipcRenderer.invoke('get-mesin-activity', mesinId, 50);
+    const res = await ipcRenderer.invoke('get-mesin-activity', mesinId, 100, 'teknisi', 90);
     const items = (res && res.activity) || [];
     if (!items.length) {
-      listEl.innerHTML = '<div class="text-center text-xs text-slate-400 py-8"><i class="ph ph-clock-counter-clockwise"></i> Belum ada riwayat aktifitas</div>';
+      listEl.innerHTML = '<div class="text-center text-xs text-slate-400 py-8"><i class="ph ph-clock-counter-clockwise"></i> Belum ada aktifitas teknisi</div>';
       return;
     }
     const typeBadge = (t) => {
-      const map = { SERVICE: 'bg-blue-100 text-blue-700', PERBAIKAN: 'bg-red-100 text-red-700', PARTS: 'bg-amber-100 text-amber-700', MONITORING: 'bg-emerald-100 text-emerald-700', LAINNYA: 'bg-slate-100 text-slate-600' };
+      const map = { SERVICE: 'bg-blue-100 text-blue-700', PERBAIKAN: 'bg-red-100 text-red-700', PARTS: 'bg-amber-100 text-amber-700', LAINNYA: 'bg-slate-100 text-slate-600' };
       return map[t] || map.LAINNYA;
     };
     const statusBadge = (s) => {
@@ -1096,7 +1149,7 @@ window.saveActivity = async (mesinId) => {
     document.getElementById('act-desc').value = '';
     document.getElementById('act-teknisi').value = '';
     app.toast('Aktifitas tercatat', 'success');
-    await window.refreshActivityList(mesinId);
+    await window.refreshTeknisiList(mesinId);
   } catch (err) {
     app.toast('Gagal: ' + (err.message || err.error || err), 'error');
   } finally {
@@ -1105,12 +1158,12 @@ window.saveActivity = async (mesinId) => {
 };
 
 window.deleteActivity = async (mesinId, activityId) => {
-  if (!confirm('Hapus riwayat aktifitas ini?')) return;
+  if (!confirm('Hapus riwayat aktifitas teknisi ini?')) return;
   const { ipcRenderer } = require('electron');
   try {
     await ipcRenderer.invoke('delete-mesin-activity', mesinId, activityId);
     app.toast('Aktifitas dihapus', 'success');
-    await window.refreshActivityList(mesinId);
+    await window.refreshTeknisiList(mesinId);
   } catch (err) {
     app.toast('Gagal: ' + (err.message || err), 'error');
   }

@@ -112,8 +112,11 @@ class ApiClient {
   }
 
   // ── Riwayat Aktifitas Mesin ──
-  async getMesinActivity(mesinId, limit = 50) {
-    return this.request('GET', `/api/mesin/${mesinId}/activity?limit=${limit}`);
+  async getMesinActivity(mesinId, limit = 50, type, days = 0) {
+    let qs = `limit=${limit}`;
+    if (type) qs += `&type=${type}`;
+    if (days > 0) qs += `&days=${days}`;
+    return this.request('GET', `/api/mesin/${mesinId}/activity?${qs}`);
   }
 
   async createMesinActivity(mesinId, payload) {

@@ -19,6 +19,7 @@ class IpcController {
     ipcMain.handle('login', async (e, { email, password, agent_label }) => {
       try {
         // PIC base login (or layered when pic_agent_id linked — handled via layered-login)
+        // Agent name = PIC name (UUID) — auto-set from user.nama, not company
         const res = await api.login(email, password, agent_label);
         realtime.connect();
 
@@ -30,7 +31,9 @@ class IpcController {
           });
           if (res.idle_timeout_min) config.setIdleTimeout(res.idle_timeout_min);
         } else {
-          // PIC base login
+          // PIC base login — agent name = PIC name (UUID)
+          const picName = (res.user && (res.user.nama || res.user.email)) || agent_label;
+          config.set('agent_label', picName);
           config.setPicSession(res.user, res.agent_id);
           if (res.user && res.user.idle_timeout_min) config.setIdleTimeout(res.user.idle_timeout_min);
           config.clearLayeredUser();
@@ -232,9 +235,9 @@ class IpcController {
 
     // ── Riwayat Aktifitas Mesin ──
     // Wrap errors so Electron IPC returns a readable message (not [object Object])
-    ipcMain.handle('get-mesin-activity', async (e, id, limit = 50) => {
+    ipcMain.handle('get-mesin-activity', async (e, id, limit = 50, type, days = 0) => {
       try {
-        return await api.getMesinActivity(id, limit);
+        return await api.getMesinActivity(id, limit, type, days);
       } catch (err) {
         throw new Error(err.error || err.message || String(err));
       }
