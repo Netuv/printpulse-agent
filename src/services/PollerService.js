@@ -117,21 +117,30 @@ class PollerService {
           dev.baseline_source = src;
           console.log(`[Poller] ${dev.ip} initial baseline: BW=${dev.initial_bw} Color=${dev.initial_color} (${src})`);
         } else {
-          // Detect source switch — SNMP lifetime counters vs Web period counters beda skala
           const prevSrc = dev.baseline_source || 'snmp';
-          const deltaBw = (data.bw_counter || 0) - (dev.initial_bw || 0);
-          const deltaCol = (data.color_counter || 0) - (dev.initial_color || 0);
+          const curBw = data.bw_counter || 0;
+          const curColor = data.color_counter || 0;
+          const deltaBw = curBw - (dev.initial_bw || 0);
+          const deltaCol = curColor - (dev.initial_color || 0);
           const sourceChanged = prevSrc !== src;
-          // Re-baseline when: source changed AND delta went very negative, OR
-          // current counter dropped far below the stored baseline even with the
-          // same source (stale/wrong-scale baseline, e.g. web period counter that
-          // later became a lifetime counter). Prevents negative "Sejak Tracking".
-          const drifted = deltaBw < -1000 || deltaCol < -1000;
-          if (drifted) {
-            console.log(`[Poller] ${dev.ip} re-baseline (${sourceChanged ? 'source ' + prevSrc + '→' + src : 'drift'} delta was ${deltaBw}/${deltaCol})`);
-            dev.initial_bw = data.bw_counter || 0;
-            dev.initial_color = data.color_counter || 0;
+
+          // Self-heal: if initial was zeroed by a transient failure, restore from
+          // the first valid counter returned (counter > 0 with no previous drift).
+          if (dev.initial_bw === 0 && curBw > 100 && deltaBw > -1000 && deltaBw < 1000) {
+            console.log(`[Poller] ${dev.ip} self-heal initial from 0 → ${curBw}/${curColor}`);
+            dev.initial_bw = curBw;
+            dev.initial_color = curColor;
             dev.baseline_source = src;
+          } else if (curBw > 0 && curColor >= 0) {
+            // Re-baseline only when BOTH counters are non-zero (real data, not transient 0)
+            // and delta is deeply negative (stale/wrong-scale baseline).
+            const drifted = deltaBw < -1000 || deltaCol < -1000;
+            if (drifted) {
+              console.log(`[Poller] ${dev.ip} re-baseline (${sourceChanged ? 'source ' + prevSrc + '→' + src : 'drift'} delta was ${deltaBw}/${deltaCol})`);
+              dev.initial_bw = curBw;
+              dev.initial_color = curColor;
+              dev.baseline_source = src;
+            }
           }
           dev.baseline_source = src;
         }
