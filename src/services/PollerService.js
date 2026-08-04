@@ -1099,24 +1099,32 @@ class PollerService {
     };
 
     const tryPages = async (pages, fetchFn) => {
+      // Fetch all candidate pages of this category IN PARALLEL — first success wins.
+      // Sequential probing made slow web UIs exceed the poll timeout (HP 82/85 got
+      // marked OFFLINE despite working web). Promise.any resolves on first success;
+      // all-fail falls back to null.
+      const attempts = [];
       for (const proto of ['http', 'https']) {
         for (const page of pages) {
-          // Handle Toshiba :8080 port prefix
           let port = null;
           let path = page;
-          if (page.startsWith(':8080')) {
-            port = 8080;
-            path = page.slice(5);
-          }
-          const r = await this._httpFetchRaw(proto, ip, path, authHeader, 0, port);
-          if (process.env.PP_DEBUG) console.log(`   [scrape] ${proto}://${ip}/${path} → ${r.status}${r.statusCode ? ' (' + r.statusCode + ')' : ''} len=${r.html.length}`);
-          if (r.status === 'ok') {
+          if (page.startsWith(':8080')) { port = 8080; path = page.slice(5); }
+          attempts.push((async () => {
+            const r = await this._httpFetchRaw(proto, ip, path, authHeader, 0, port);
+            if (r.status !== 'ok') throw new Error('not-ok');
             const data = fetchFn(r.html, page);
             if (data && (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0)) return data;
-          }
+            throw new Error('empty');
+          })());
         }
       }
-      return null;
+      // Promise.any — first fulfilled wins; all rejected → null
+      if (attempts.length === 0) return null;
+      try {
+        return await Promise.any(attempts);
+      } catch {
+        return null;
+      }
     };
 
     // Toner pages — try vendor-first ordering
@@ -1321,17 +1329,24 @@ class PollerService {
         if (gotAny) console.log(`   🔍 Layer2 full auto-discovery enriched data for ${ip}`);
       }
     } else if (hasGap) {
-      // Quick gap-fill: probe a handful of known vendor paths (fast, ~6 fetches)
-      // instead of a full crawl. Cheap per poll, no 40-page flood.
+      // Quick gap-fill: probe known vendor paths IN PARALLEL (fast, one round-trip
+      // batch) instead of sequential — sequential took too long for slow web UIs.
       const quickPaths = ['stsply.htm', 'prcnt.htm', 'sttray.htm', 'stgen.htm',
         '/hp/device/DeviceStatus/Index', '/SSI/supply_status_info.htm',
         '/web/guest/en/websys/status/getUnificationCounter.cgi', '/general/status.html',
         '/wcd/top.xml', '/sws/app/information/home/home.json'];
-      for (const qp of quickPaths) {
-        if (result.toner.length > 0 && result.trays.length > 0 && Object.keys(result.usage).length > 0) break;
+      const need = () => !(result.toner.length > 0 && result.trays.length > 0 && Object.keys(result.usage).length > 0);
+      if (need()) {
+        const fetches = [];
         for (const proto of ['http', 'https']) {
-          const r = await this._httpFetchRaw(proto, ip, qp, authHeader);
-          if (r.status !== 'ok') continue;
+          for (const qp of quickPaths) {
+            fetches.push(this._httpFetchRaw(proto, ip, qp, authHeader));
+          }
+        }
+        const responses = await Promise.allSettled(fetches);
+        for (const rsp of responses) {
+          const r = rsp.status === 'fulfilled' ? rsp.value : null;
+          if (!r || r.status !== 'ok' || !need()) continue;
           const h = r.html;
           const t = this.parseConsumableHTML(h);
           if (t && t.toner.length > 0 && result.toner.length === 0) { result.toner = t.toner; result.toner_from_layer2 = true; gotAny = true; }
@@ -1346,7 +1361,6 @@ class PollerService {
               result.usage = ru.usage; result.usage_detail = ru.detail; gotAny = true;
             }
           }
-          if (gotAny) break;
         }
       }
       if (gotAny) console.log(`   🔍 Layer2 quick gap-fill enriched data for ${ip}`);
