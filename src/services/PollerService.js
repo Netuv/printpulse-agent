@@ -1170,8 +1170,12 @@ class PollerService {
       const tScan = pick(['total scanned', 'scan images', 'scanned images', 'total scan']);
       const tFax = pick(['total fax']);
       // Aggregate counters are the source of truth for total BW/color.
-      const aggBw = (result.bw_counter || result.total_bw || 0);
-      const aggColor = (result.color_counter || result.total_color || 0);
+      // Inside scrapeAllWebUI result.bw_counter isn't set yet — read from usage
+      // counters directly (Black/Color Printed Impressions), fallback result fields.
+      const aggBw = pick(['black printed', 'black impressions', 'black copy', 'black'])
+        || (result.bw_counter || result.total_bw || 0);
+      const aggColor = pick(['color printed', 'color impressions', 'color copy', 'color'])
+        || (result.color_counter || result.total_color || 0);
       const aggTotal = aggBw + aggColor;
       // Only distribute across functions when their sum is CONSISTENT with the
       // aggregate (within 10%). Some vendors (Xerox) label the total machine
