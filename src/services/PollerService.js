@@ -125,8 +125,9 @@ class PollerService {
           const sourceChanged = prevSrc !== src;
 
           // Self-heal: if initial was zeroed by a transient failure, restore from
-          // the first valid counter returned (counter > 0 with no previous drift).
-          if (dev.initial_bw === 0 && curBw > 100 && deltaBw > -1000 && deltaBw < 1000) {
+          // the first valid counter returned (counter > 0). No delta guard needed —
+          // the initial was wrong (zeroed by bad poll), any real counter is better.
+          if (dev.initial_bw === 0 && curBw > 100) {
             console.log(`[Poller] ${dev.ip} self-heal initial from 0 → ${curBw}/${curColor}`);
             dev.initial_bw = curBw;
             dev.initial_color = curColor;
