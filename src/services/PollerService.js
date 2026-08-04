@@ -171,6 +171,9 @@ class PollerService {
         };
       } catch (err) {
         console.log(`[Poller] ${dev.ip} OFFLINE: ${err.message}`);
+        if (!String(err.message).includes('DEVICE_TIMEOUT')) {
+          console.log(`   └─ stack: ${(err.stack || '').split('\n').slice(0, 3).join(' | ')}`);
+        }
         dev.status = 'OFFLINE';
         return { id: dev.id, ip: dev.ip, status: 'OFFLINE' };
       }
