@@ -106,8 +106,14 @@ class IpcController {
       return await api.sendLogs(message, level);
     });
 
-    ipcMain.handle('scan-network', async () => {
+    ipcMain.handle('scan-network', async (e) => {
       const scanner = new Scanner(config.data);
+      // Stream discovered devices to UI as they're found (no wait for full sweep)
+      scanner.on('device-found', (dev) => {
+        try {
+          e.sender.send('scan-device-found', dev);
+        } catch (err) { /* renderer closed */ }
+      });
       const result = await scanner.scan();
       
       // Cache last scan for diff on next scan

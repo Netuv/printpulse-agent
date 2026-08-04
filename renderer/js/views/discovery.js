@@ -170,6 +170,30 @@ app.registerView('discovery', {
       scanStats.classList.add('hidden');
       discoveredList.innerHTML = '';
 
+      // Streaming: show devices as soon as each is found (no wait for full sweep)
+      const streamedIps = new Set();
+      const streamHandler = (dev) => {
+        if (streamedIps.has(dev.ip)) return;
+        streamedIps.add(dev.ip);
+        discoveredSection.classList.remove('hidden');
+        if (scanProgress.classList.contains('hidden') === false) {
+          scanProgress.innerHTML = '<p class="text-sm text-slate-500 mb-2">Scanning... ' + streamedIps.size + ' printer(s) found</p>';
+        }
+        const card = document.createElement('div');
+        card.className = 'bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-200 dark:border-slate-600';
+        card.innerHTML =
+          '<div class="flex items-center gap-3">' +
+            '<span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>' +
+            '<div class="flex-1 min-w-0">' +
+              '<div class="font-mono text-sm font-semibold text-slate-800 dark:text-slate-200">' + dev.ip + '</div>' +
+              '<div class="text-[10px] text-slate-400 truncate">' + (dev.merk_detected || 'Unknown') + ' ' + (dev.model_detected || '') + '</div>' +
+            '</div>' +
+            '<button onclick="window.addFromStream(\'' + dev.ip + '\')" class="px-3 py-1.5 text-xs font-medium text-brand-600 bg-brand-50 hover:bg-brand-100 border border-brand-200 rounded-lg">Add</button>' +
+          '</div>';
+        discoveredList.appendChild(card);
+      };
+      ipcRenderer.on('scan-device-found', streamHandler);
+
       try {
         const result = await ipcRenderer.invoke('scan-network');
         
@@ -220,6 +244,7 @@ app.registerView('discovery', {
         app.toast('Scan failed: ' + (err.message || 'Error'), 'error');
         emptyState.classList.remove('hidden');
       } finally {
+        ipcRenderer.removeListener('scan-device-found', streamHandler);
         btnScan.disabled = false;
         btnScan.classList.remove('opacity-70');
         scanText.textContent = 'Scan';
@@ -229,6 +254,11 @@ app.registerView('discovery', {
 
     btnScan.addEventListener('click', doScan);
     btnScanEmpty.addEventListener('click', doScan);
+
+    // Add device from streaming card (device already scanned, just register)
+    window.addFromStream = async (ip) => {
+      await doTrackDevice(ip, '', '', '', '', '', null);
+    };
 
     // Make global for onclick handlers — always track directly
     // Web scraping will auto-detect if credentials are needed during polling

@@ -15,6 +15,7 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const snmp = require('net-snmp');
 const crypto = require('crypto');
+const { EventEmitter } = require('events');
 
 const execAsync = promisify(exec);
 
@@ -60,7 +61,7 @@ const HOST_STATUS_MAP = { 1:'Running', 2:'Warning', 3:'Testing', 4:'Down', 5:'Un
 // COMPREHENSIVE SCANNER CLASS
 // =====================================================================
 
-class ComprehensiveScanner {
+class ComprehensiveScanner extends EventEmitter {
   constructor(config) {
     this.config = config || {};
     this.snmpConfig = config.snmp || {};
@@ -90,10 +91,25 @@ class ComprehensiveScanner {
     console.log('\n🔍 Step 3: Probing devices for SNMP (Concurrent)...');
     const devices = [];
     
-    const probePromises = activeHosts.map(host => 
+    const probePromises = activeHosts.map((host, idx) => 
       this.probeDeviceComprehensive(host).then(deviceInfo => {
         if (deviceInfo) {
           console.log(`   ✓ ${host} - ${deviceInfo.vendor || 'Unknown'} ${deviceInfo.model || ''}`);
+          // Streaming: emit as soon as a device is found, so the UI can show
+          // devices incrementally instead of waiting for the full sweep.
+          this.emit('device-found', {
+            ip: deviceInfo.ip || host,
+            merk_detected: deviceInfo.vendor,
+            model_detected: deviceInfo.model,
+            sn: deviceInfo.serial,
+            hostname: deviceInfo.hostname,
+            status: deviceInfo.status || deviceInfo.host_status,
+            total_pages: deviceInfo.total_pages,
+            total_bw: deviceInfo.total_bw,
+            total_color: deviceInfo.total_color,
+            found_count: idx + 1,
+            total_hosts: activeHosts.length,
+          });
           return deviceInfo;
         }
         return null;
