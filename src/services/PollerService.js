@@ -97,14 +97,16 @@ class PollerService {
     const syncPayload = { devices: [] };
 
     // Parallel poll all devices — with per-device timeout so one slow device
-    // (e.g. 60s snmpy timeout) can never block the whole sync cycle.
-    const DEVICE_TIMEOUT = 45000; // 45s — snmpy chain is sequential (phased→deep→standard),
-    // web scrape is ~7s/page, so 45s is plenty for online devices and fast for offline
+    // can never block the whole sync cycle. Web scraping gets more time than
+    // SNMP: a web UI with Layer2 crawl can take 60-90s, while SNMP offline
+    // detection is fast. A device is ONLINE if EITHER succeeds.
+    const WEB_TIMEOUT = 90000;   // web scrape incl. Layer2
+    const SNMP_TIMEOUT = 25000;  // snmpy chain + node fallback
     const pollResults = await Promise.allSettled(devices.map(async (dev) => {
       try {
         const data = await Promise.race([
           this.readPrinterComprehensive(dev),
-          new Promise((_, rej) => setTimeout(() => rej(new Error('DEVICE_TIMEOUT')), DEVICE_TIMEOUT)),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('DEVICE_TIMEOUT')), WEB_TIMEOUT)),
         ]);
         
         // ── Baseline management ──
@@ -302,6 +304,13 @@ class PollerService {
       // Strategy 4: Node.js fallback
       return await this.readPrinterSNMP(dev);
     })();
+    // Cap SNMP at 25s — a hung SNMP chain must never block a device whose web
+    // UI works (HP 82/85 got marked OFFLINE because slow web + hung SNMP both
+    // exceeded the old 45s race; web data was discarded).
+    const snmpRaced = Promise.race([
+      snmpPromise,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('SNMP_TIMEOUT')), 25000)),
+    ]).catch(() => null);
 
     // Web scraper: try all pages — anonymous first, then with creds
     const webPromise = (async () => {
@@ -309,7 +318,7 @@ class PollerService {
       return web; // { status, toner, trays, usage, detail }
     })();
 
-    const [snmpResult, webResult] = await Promise.allSettled([snmpPromise, webPromise]);
+    const [snmpResult, webResult] = await Promise.allSettled([snmpRaced, webPromise]);
     const snmpData = snmpResult.status === 'fulfilled' ? snmpResult.value : null;
     const webData = webResult.status === 'fulfilled' ? webResult.value : null;
 
