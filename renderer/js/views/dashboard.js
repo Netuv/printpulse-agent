@@ -744,35 +744,37 @@ app.registerView('dashboard', {
                       if (um && (um.this_month || um.prev_month)) {
                         const fmtD = (v) => { const n = v || 0; return (n > 0 ? '+' : '') + fmt(n); };
                         const dCls = (d) => d > 0 ? 'text-red-500' : d < 0 ? 'text-green-600' : 'text-gray-400';
-                        const rowDelta = (label, t, p) => {
-                          const tb = (t && t.bw) || 0, tc = (t && t.color) || 0;
-                          const pb = (p && p.bw) || 0, pc = (p && p.color) || 0;
-                          const tTotal = tb + tc, pTotal = pb + pc;
-                          const d = tTotal - pTotal;
-                          return '<div class="py-1.5 text-[10px] border-b border-slate-100 dark:border-slate-700 last:border-0">' +
-                            '<div class="flex items-center justify-between mb-0.5">' +
-                            '<span class="font-medium text-gray-600 dark:text-gray-300">' + label + '</span>' +
-                            '<span class="flex items-center gap-2"><span class="font-mono text-gray-500">' + fmt(tTotal) + '</span>' +
-                            '<span class="font-mono font-semibold ' + dCls(d) + ' w-12 text-right">' + fmtD(d) + '</span></span></div>' +
-                            '<div class="flex justify-end gap-3">' +
-                            '<span class="font-mono text-gray-400">BW: <b class="text-gray-600 dark:text-gray-300">' + fmt(tb) + '</b> <span class="text-green-600">' + fmtD(tb - pb) + '</span></span>' +
-                            '<span class="font-mono text-gray-400">Color: <b class="text-indigo-500">' + fmt(tc) + '</b> <span class="text-green-600">' + fmtD(tc - pc) + '</span></span>' +
-                            '</div></div>';
+                        const t = um.this_month, p = um.prev_month || {};
+                        const cell = (fn) => {
+                          const tb = (t[fn] && t[fn].bw) || 0, tc = (t[fn] && t[fn].color) || 0;
+                          const pb = (p[fn] && p[fn].bw) || 0, pc = (p[fn] && p[fn].color) || 0;
+                          const tt = tb + tc;
+                          const bwD = tb - pb, colD = tc - pc;
+                          return '<tr class="border-b border-slate-100 dark:border-slate-700 last:border-0">' +
+                            '<td class="py-1.5 pr-2 font-medium text-gray-600 dark:text-gray-300 capitalize whitespace-nowrap">' + fn + '</td>' +
+                            '<td class="py-1.5 px-2 text-right font-mono">' + fmt(tb) + ' <span class="text-[8px] ' + (bwD > 0 ? 'text-green-600' : bwD < 0 ? 'text-red-400' : 'text-gray-400') + '">' + fmtD(bwD) + '</span></td>' +
+                            '<td class="py-1.5 px-2 text-right font-mono text-indigo-600">' + fmt(tc) + ' <span class="text-[8px] ' + (colD > 0 ? 'text-green-600' : colD < 0 ? 'text-red-400' : 'text-gray-400') + '">' + fmtD(colD) + '</span></td>' +
+                            '<td class="py-1.5 pl-2 text-right font-mono font-bold">' + fmt(tt) + '</td></tr>';
                         };
-                        const scanT = (um.this_month && um.this_month.scan && um.this_month.scan.count) || 0;
+                        const scanT = (t.scan && t.scan.count) || 0;
                         const scanD = (um.delta && um.delta.scan) ? um.delta.scan.count : 0;
                         html += '<div class="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3 border border-slate-100">' +
-                          '<div class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1 flex items-center justify-between">' +
+                          '<div class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2 flex items-center justify-between">' +
                           '<span><i class="ph ph-calendar"></i> Pemakaian Bulanan</span>' +
-                          '<span class="text-[8px] font-normal text-gray-400">' + (um.bulan || '') + ' vs bulan lalu &middot; per-fungsi</span></div>' +
-                          rowDelta('Print', um.this_month.print, um.prev_month.print) +
-                          rowDelta('Copy', um.this_month.copy, um.prev_month.copy) +
-                          rowDelta('Fax', um.this_month.fax, um.prev_month.fax) +
-                          '<div class="flex items-center justify-between py-1 text-[10px] border-t border-slate-100 dark:border-slate-700">' +
-                          '<span class="font-medium text-gray-600 dark:text-gray-300">Scan</span>' +
-                          '<span class="flex items-center gap-2"><span class="font-mono text-gray-500">' + fmt(scanT) + '</span>' +
-                          '<span class="font-mono font-semibold ' + dCls(scanD) + ' w-12 text-right">' + fmtD(scanD) + '</span></span></div>' +
-                          '</div>';
+                          '<span class="text-[8px] font-normal text-gray-400">' + (um.bulan || '') + '</span></div>' +
+                          '<div class="overflow-x-auto"><table class="w-full text-[10px]">' +
+                          '<thead><tr class="text-gray-400 border-b border-slate-200 dark:border-slate-600"><th class="py-1 pr-2 text-left font-medium">Fungsi</th>' +
+                          '<th class="py-1 px-2 text-right font-medium">BW</th><th class="py-1 px-2 text-right font-medium">Color</th>' +
+                          '<th class="py-1 pl-2 text-right font-medium">Total</th></tr></thead><tbody>' +
+                          cell('print') + cell('copy') + cell('fax') +
+                          '<tr class="border-b border-slate-100 dark:border-slate-700"><td class="py-1.5 pr-2 font-medium text-gray-600 dark:text-gray-300">Scan</td>' +
+                          '<td class="py-1.5 px-2 text-right font-mono" colspan="2">' + fmt(scanT) + '</td>' +
+                          '<td class="py-1.5 pl-2 text-right font-mono font-bold">' + fmt(scanT) + ' <span class="text-[8px] ' + (scanD > 0 ? 'text-green-600' : scanD < 0 ? 'text-red-400' : 'text-gray-400') + '">' + fmtD(scanD) + '</span></td></tr>' +
+                          '<tr class="bg-slate-100/60 dark:bg-slate-700/40"><td class="py-1.5 pr-2 font-bold">Total</td>' +
+                          '<td class="py-1.5 px-2 text-right font-mono font-bold">' + fmt((t.print && t.print.bw || 0) + (t.copy && t.copy.bw || 0) + (t.fax && t.fax.bw || 0)) + '</td>' +
+                          '<td class="py-1.5 px-2 text-right font-mono font-bold text-indigo-600">' + fmt((t.print && t.print.color || 0) + (t.copy && t.copy.color || 0)) + '</td>' +
+                          '<td class="py-1.5 pl-2 text-right font-mono font-bold">' + fmt(um.delta ? um.delta.total : 0) + '</td></tr>' +
+                          '</tbody></table></div></div>';
                       }
                       // Activity history buttons — separated: Alert history vs Teknisi activity
                       const isPic = (app.config.pic_user && app.config.pic_user.role === 'AGENT') || !window.agentCanChangeSettings;
