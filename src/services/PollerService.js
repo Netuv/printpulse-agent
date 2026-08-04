@@ -681,8 +681,18 @@ class PollerService {
    * Handles unified (toner_levels) and deep (supplies.toners) output
    */
   formatSnmpyResult(result) {
-    const bw = result.total_bw || 0;
-    const color = result.total_color || 0;
+    let bw = result.total_bw || 0;
+    let color = result.total_color || 0;
+    // Single-total printers (e.g. Epson WF-C5790) report only a lifetime total
+    // with no BW/color split (counter_source 'total_only'). Split 70/30 so the
+    // monthly baseline stays consistent with buildPhasedPayload's split — otherwise
+    // one poll stores the split and the next stores the raw total, corrupting the
+    // monthly delta (bw jumps +30%, color goes negative).
+    if (bw > 0 && color === 0 && result.counter_source === 'total_only') {
+      const total = bw;
+      bw = Math.round(total * 0.7);
+      color = total - bw;
+    }
     
     // Toner: from unified (toner_levels) or deep (supplies.toners)
     // Guard: ignore pct outside 0-100 (HP inkjet pages-remaining like 3603/32700)
