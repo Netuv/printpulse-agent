@@ -174,6 +174,22 @@ class PollerService {
         if (!String(err.message).includes('DEVICE_TIMEOUT')) {
           console.log(`   └─ stack: ${(err.stack || '').split('\n').slice(0, 3).join(' | ')}`);
         }
+        // Grace period: if we have last good data (from a previous successful poll),
+        // keep the device ONLINE with stale data instead of flapping OFFLINE.
+        // Slow web devices (many Layer2 links) may exceed a poll timeout occasionally;
+        // a single missed poll must not mark a working printer offline.
+        const last = dev.last_data;
+        if (last && (last.bw_counter > 0 || last.color_counter > 0 || (last.toner && last.toner.length > 0))) {
+          console.log(`   └─ grace: keep ONLINE with last data (${last.bw_counter || 0}/${last.color_counter || 0})`);
+          return {
+            id: dev.id,
+            ip: dev.ip,
+            status: 'ONLINE',
+            initial_bw: dev.initial_bw,
+            initial_color: dev.initial_color,
+            ...last,
+          };
+        }
         dev.status = 'OFFLINE';
         return { id: dev.id, ip: dev.ip, status: 'OFFLINE' };
       }
