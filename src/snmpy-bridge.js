@@ -113,7 +113,7 @@ class SnmpyBridge {
     }
     
     const fullArgs = [this.scriptPath, ...args];
-    return await this.spawnWithTimeout(this.pythonCmd, fullArgs, 60000);
+    return await this.spawnWithTimeout(this.pythonCmd, fullArgs, 25000);
   }
 
   /**

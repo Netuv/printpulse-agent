@@ -98,7 +98,8 @@ class PollerService {
 
     // Parallel poll all devices — with per-device timeout so one slow device
     // (e.g. 60s snmpy timeout) can never block the whole sync cycle.
-    const DEVICE_TIMEOUT = 110000; // 110s — generous for full SNMP+web scrape
+    const DEVICE_TIMEOUT = 45000; // 45s — snmpy chain is sequential (phased→deep→standard),
+    // web scrape is ~7s/page, so 45s is plenty for online devices and fast for offline
     const pollResults = await Promise.allSettled(devices.map(async (dev) => {
       try {
         const data = await Promise.race([
