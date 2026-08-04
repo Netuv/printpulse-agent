@@ -1169,28 +1169,42 @@ class PollerService {
       const tCopy = pick(['total copied', 'total copy', 'copy impressions']);
       const tScan = pick(['total scanned', 'scan images', 'scanned images', 'total scan']);
       const tFax = pick(['total fax']);
-      // BW/color split for print/copy — aggregate bw_counter/color_counter when available
+      // Aggregate counters are the source of truth for total BW/color.
       const aggBw = (result.bw_counter || result.total_bw || 0);
       const aggColor = (result.color_counter || result.total_color || 0);
       const aggTotal = aggBw + aggColor;
-      const hasSplit = tPrint > 0 || tCopy > 0 || tFax > 0 || tScan > 0;
-      if (hasSplit || aggTotal > 0) {
-        const bwShare = aggTotal > 0 && aggBw > 0 ? aggBw / aggTotal : 0.7;
-        const splitFn = (fn) => {
+      // Only distribute across functions when their sum is CONSISTENT with the
+      // aggregate (within 10%). Some vendors (Xerox) label the total machine
+      // counter "Total Printed Impressions" — using it as "print" double-counts
+      // (print+copy > real total). In that case, attribute everything to print.
+      const fnTotal = tPrint + tCopy + tFax;
+      const consistent = aggTotal > 0 && fnTotal > 0 && fnTotal <= aggTotal * 1.1 && fnTotal >= aggTotal * 0.9;
+      if (consistent) {
+        // Distribute aggregate BW/color across functions proportionally
+        const bwShare = aggBw / aggTotal;
+        const fnSplit = (fn) => {
           const tot = Math.round(fn);
           return { bw: Math.round(tot * bwShare), color: tot - Math.round(tot * bwShare) };
         };
-        const printV = hasSplit ? splitFn(tPrint) : (aggTotal > 0 ? { bw: aggBw, color: aggColor } : { bw: 0, color: 0 });
-        const copyV = hasSplit ? splitFn(tCopy) : { bw: 0, color: 0 };
-        const faxV = hasSplit ? splitFn(tFax) : { bw: 0, color: 0 };
         result.usage_detail = {
-          print: printV,
-          copy: copyV,
-          fax: faxV,
-          scan: hasSplit ? { count: tScan } : { count: 0 },
+          print: fnSplit(tPrint),
+          copy: fnSplit(tCopy),
+          fax: fnSplit(tFax),
+          scan: { count: tScan },
           source: 'usage_fallback',
         };
-        console.log(`   ✅ usage_detail fallback (${result.ip || ''}): print=${printV.bw}/${printV.color} copy=${copyV.bw}/${copyV.color} src=usage_fallback`);
+        console.log(`   ✅ usage_detail fallback (distributed, ${result.ip || ''}): print=${fnSplit(tPrint).bw}/${fnSplit(tPrint).color} copy=${fnSplit(tCopy).bw}/${fnSplit(tCopy).color} src=usage_fallback`);
+      } else if (aggTotal > 0) {
+        // Not consistent → all usage is print (aggregate BW/color). Honest, no
+        // double-count, and monthly print delta = aggregate delta.
+        result.usage_detail = {
+          print: { bw: aggBw, color: aggColor },
+          copy: { bw: 0, color: 0 },
+          fax: { bw: 0, color: 0 },
+          scan: { count: tScan },
+          source: 'usage_fallback',
+        };
+        console.log(`   ✅ usage_detail fallback (all-to-print, ${result.ip || ''}): print=${aggBw}/${aggColor} src=usage_fallback`);
       }
     }
 
