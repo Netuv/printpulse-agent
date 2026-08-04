@@ -1151,6 +1151,49 @@ class PollerService {
       gotAny = true;
     }
 
+    // Universal per-function detail — ALL vendors get usage_detail, so monthly
+    // breakdown (print/copy/fax/scan BW+Color) works for every machine.
+    // Priority: vendor parser detail (Ricoh/HP) > counter-derived (Samsung/
+    // Xerox print+copy+scan) > aggregate-to-print (everything else).
+    if (!result.usage_detail) {
+      const u = result.usage || {};
+      const pick = (keys) => {
+        for (const k of keys) {
+          for (const [label, val] of Object.entries(u)) {
+            if (label.toLowerCase().includes(k)) return Number(val) || 0;
+          }
+        }
+        return 0;
+      };
+      const tPrint = pick(['total printed', 'total print', 'print impressions', 'total impressions']);
+      const tCopy = pick(['total copied', 'total copy', 'copy impressions']);
+      const tScan = pick(['total scanned', 'scan images', 'scanned images', 'total scan']);
+      const tFax = pick(['total fax']);
+      // BW/color split for print/copy — aggregate bw_counter/color_counter when available
+      const aggBw = (result.bw_counter || result.total_bw || 0);
+      const aggColor = (result.color_counter || result.total_color || 0);
+      const aggTotal = aggBw + aggColor;
+      const hasSplit = tPrint > 0 || tCopy > 0 || tFax > 0 || tScan > 0;
+      if (hasSplit || aggTotal > 0) {
+        const bwShare = aggTotal > 0 && aggBw > 0 ? aggBw / aggTotal : 0.7;
+        const splitFn = (fn) => {
+          const tot = Math.round(fn);
+          return { bw: Math.round(tot * bwShare), color: tot - Math.round(tot * bwShare) };
+        };
+        const printV = hasSplit ? splitFn(tPrint) : (aggTotal > 0 ? { bw: aggBw, color: aggColor } : { bw: 0, color: 0 });
+        const copyV = hasSplit ? splitFn(tCopy) : { bw: 0, color: 0 };
+        const faxV = hasSplit ? splitFn(tFax) : { bw: 0, color: 0 };
+        result.usage_detail = {
+          print: printV,
+          copy: copyV,
+          fax: faxV,
+          scan: hasSplit ? { count: tScan } : { count: 0 },
+          source: 'usage_fallback',
+        };
+        console.log(`   ✅ usage_detail fallback (${result.ip || ''}): print=${printV.bw}/${printV.color} copy=${copyV.bw}/${copyV.color} src=usage_fallback`);
+      }
+    }
+
     // Status pages
     const statusHtml = await tryPages(orderedPages('status'), (h) => {
       // Reuse consumable parser for device status (HP)
