@@ -1351,7 +1351,10 @@ class PollerService {
           if (!r || r.status !== 'ok' || !need()) continue;
           const h = r.html;
           const t = this.parseConsumableHTML(h);
-          if (t && t.toner.length > 0 && result.toner.length === 0) { result.toner = t.toner; result.toner_from_layer2 = true; gotAny = true; }
+          // Known vendor paths (stsply.htm etc.) are REAL web data — not Layer2
+          // discovery artifacts. Do NOT flag toner_from_layer2 here; that flag is
+          // only for the full crawl (may mis-parse random pages as toner).
+          if (t && t.toner.length > 0 && result.toner.length === 0) { result.toner = t.toner; gotAny = true; }
           const trays = this.parseTrayHTML(h);
           if (trays && trays.length > 0 && result.trays.length === 0) {
             result.trays = trays.map(t => ({ index: t.index || '', name: t.name || '', media_name: t.media_name || '', sheets: t.sheets !== null ? Math.round(t.sheets) : (t.percentage ?? null), percentage: t.percentage, status: t.status }));
