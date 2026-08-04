@@ -1099,13 +1099,15 @@ class PollerService {
     };
 
     const tryPages = async (pages, fetchFn) => {
-      // Fetch all candidate pages of this category IN PARALLEL — first success wins.
-      // Sequential probing made slow web UIs exceed the poll timeout (HP 82/85 got
-      // marked OFFLINE despite working web). Promise.any resolves on first success;
-      // all-fail falls back to null.
+      // Fetch candidate pages IN PARALLEL — first success wins. Limit to vendor-first
+      // paths + a few generic ones (not ALL http+https combos — that floods the
+      // device with ~30 requests/category). http tried before https (printers usually
+      // serve plain http; https self-signed adds latency).
+      const maxPages = Math.min(pages.length, 8);
       const attempts = [];
       for (const proto of ['http', 'https']) {
-        for (const page of pages) {
+        for (let i = 0; i < maxPages; i++) {
+          const page = pages[i];
           let port = null;
           let path = page;
           if (page.startsWith(':8080')) { port = 8080; path = page.slice(5); }
