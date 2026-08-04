@@ -1246,15 +1246,18 @@ class PollerService {
       gotAny = true;
     }
 
-    // ── LAYER 2 FULL: Auto-discovery — crawl ALL pages, fill gaps, leave nothing behind ──
-    // Runs as a complement when there are gaps, or periodically (every 6h) to
-    // catch new detail pages. Not every poll — full crawl is expensive (40 pages).
+    // ── LAYER 2: Auto-discovery — crawl pages, fill gaps ──
+    // Full crawl (up to 40 pages) is EXPENSIVE — only every 6h per device.
+    // When gaps exist, probe the few known vendor paths quickly instead of
+    // crawling everything (a full crawl per poll made offline/no-UI devices
+    // block the cycle and hit "Previous poll still running").
     const now = Date.now();
     const lastL2 = (dev && dev._layer2At) || 0;
     const hasGap = !result.toner || result.toner.length === 0 ||
       !result.trays || result.trays.length === 0 ||
       !result.usage || Object.keys(result.usage).length === 0;
-    if (hasGap || (now - lastL2) > 6 * 3600 * 1000) {
+    const dueFull = (now - lastL2) > 6 * 3600 * 1000;
+    if (dueFull) {
       if (dev) dev._layer2At = now;
       const discovered = await this.discoverWebPaths(ip, dev, authHeader);
       if (discovered) {
@@ -1262,8 +1265,6 @@ class PollerService {
         if (!result.toner || result.toner.length === 0) {
           if (discovered.toner && discovered.toner.length > 0) {
             result.toner = discovered.toner;
-            // Mark as Layer-2 sourced — NOT reliable enough to override SNMP
-            // estimation (Layer 2 may mis-parse a page as toner, e.g. Ricoh WIM).
             result.toner_from_layer2 = true;
             gotAny = true;
           }
@@ -1281,7 +1282,6 @@ class PollerService {
         if (!result.deviceInfo || Object.keys(result.deviceInfo).length === 0) {
           if (discovered.deviceInfo && Object.keys(discovered.deviceInfo).length > 0) { result.deviceInfo = discovered.deviceInfo; gotAny = true; }
         }
-        // Alerts & jobs always merge (Layer 2 may find pages known paths miss)
         if (discovered.alerts && discovered.alerts.length > 0) {
           result.alerts = (result.alerts || []).concat(discovered.alerts);
           gotAny = true;
@@ -1292,6 +1292,36 @@ class PollerService {
         }
         if (gotAny) console.log(`   🔍 Layer2 full auto-discovery enriched data for ${ip}`);
       }
+    } else if (hasGap) {
+      // Quick gap-fill: probe a handful of known vendor paths (fast, ~6 fetches)
+      // instead of a full crawl. Cheap per poll, no 40-page flood.
+      const quickPaths = ['stsply.htm', 'prcnt.htm', 'sttray.htm', 'stgen.htm',
+        '/hp/device/DeviceStatus/Index', '/SSI/supply_status_info.htm',
+        '/web/guest/en/websys/status/getUnificationCounter.cgi', '/general/status.html',
+        '/wcd/top.xml', '/sws/app/information/home/home.json'];
+      for (const qp of quickPaths) {
+        if (result.toner.length > 0 && result.trays.length > 0 && Object.keys(result.usage).length > 0) break;
+        for (const proto of ['http', 'https']) {
+          const r = await this._httpFetchRaw(proto, ip, qp, authHeader);
+          if (r.status !== 'ok') continue;
+          const h = r.html;
+          const t = this.parseConsumableHTML(h);
+          if (t && t.toner.length > 0 && result.toner.length === 0) { result.toner = t.toner; result.toner_from_layer2 = true; gotAny = true; }
+          const trays = this.parseTrayHTML(h);
+          if (trays && trays.length > 0 && result.trays.length === 0) {
+            result.trays = trays.map(t => ({ index: t.index || '', name: t.name || '', media_name: t.media_name || '', sheets: t.sheets !== null ? Math.round(t.sheets) : (t.percentage ?? null), percentage: t.percentage, status: t.status }));
+            gotAny = true;
+          }
+          if (h.includes('Full Color') || h.includes('Black &amp; White')) {
+            const ru = this.parseRicohCounters(h);
+            if (ru.usage && Object.keys(ru.usage).length && Object.keys(result.usage).length === 0) {
+              result.usage = ru.usage; result.usage_detail = ru.detail; gotAny = true;
+            }
+          }
+          if (gotAny) break;
+        }
+      }
+      if (gotAny) console.log(`   🔍 Layer2 quick gap-fill enriched data for ${ip}`);
     }
 
     if (gotAny) {
@@ -1508,34 +1538,39 @@ class PollerService {
       this.tryParsePage(h, path, found, proto, ip, authHeader, fetchAndParse);
     };
 
+    const fetchBatch = async (proto, paths) => {
+      const CONCURRENCY = 6;
+      for (let i = 0; i < paths.length; i += CONCURRENCY) {
+        await Promise.all(paths.slice(i, i + CONCURRENCY).map(p => fetchAndParse(proto, p)));
+        if (visited.size >= MAX_PAGES) break;
+      }
+    };
+
     for (const proto of ['http', 'https']) {
       // Step 1: fetch root
       const root = await this._httpFetchRaw(proto, ip, '', authHeader);
       if (root.status !== 'ok' || root.html.length < 50) continue;
       const looksHtml = /<html|<head|<body|<title/i.test(root.html);
       if (!looksHtml) {
-        // Binary/compressed root — probe known paths directly
+        // Binary/compressed root — probe known paths directly (parallel)
         console.log(`   🔍 Layer2: ${proto} root binary — probing known paths for ${ip}`);
         const known = ['/hp/device/DeviceStatus/Index', '/SSI/supply_status_info.htm', 'stsply.htm',
           '/web/guest/en/websys/status/getUnificationCounter.cgi', '/general/status.html', '/wcd/top.xml',
           '/sws/app/information/home/home.json'];
-        for (const kp of known) await fetchAndParse(proto, kp);
+        await fetchBatch(proto, known);
         break;
       }
 
-      // Step 2: extract ALL links (no 15 limit — full crawl)
+      // Step 2: extract ALL links
       const links = this.extractInternalLinks(root.html, ip);
       console.log(`   🔍 Layer2: ${proto} root → ${links.length} candidate link(s) for ${ip}`);
 
-      // Step 3: fetch + parse EVERY candidate (deduped, capped at MAX_PAGES).
-      // If root exposes no links (frames/login), still probe known vendor paths.
+      // Step 3: fetch + parse EVERY candidate in parallel batches
       const toCrawl = links.length > 0 ? links : ['stsply.htm', 'prcnt.htm', 'sttray.htm', 'stgen.htm',
         '/hp/device/DeviceStatus/Index', '/SSI/supply_status_info.htm', '/general/status.html',
         '/web/guest/en/websys/status/getUnificationCounter.cgi', '/wcd/top.xml',
         '/sws/app/information/home/home.json'];
-      for (const link of toCrawl) await fetchAndParse(proto, link);
-
-      // Continue to next protocol to maximize coverage (don't break early)
+      await fetchBatch(proto, toCrawl);
     }
 
     // Dedupe/order: pick most-complete toner set if multiple pages gave toner
@@ -1765,9 +1800,9 @@ class PollerService {
 
       const timeout = setTimeout(() => {
         resolve({ status: 'error', toner: [], detail: 'Timeout' });
-      }, 8000);
+      }, 4000);
 
-      http.get(`${protocol}://${ip}/${path}`, { timeout: 7000, headers, rejectUnauthorized: false }, (res) => {
+      http.get(`${protocol}://${ip}/${path}`, { timeout: 3500, headers, rejectUnauthorized: false }, (res) => {
         // Follow redirects (301, 302, 307, 308)
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           clearTimeout(timeout);
@@ -2047,9 +2082,9 @@ class PollerService {
 
       const timeout = setTimeout(() => {
         resolve({ status: 'error', html: '' });
-      }, 8000);
+      }, 4000);
 
-      const opts = { timeout: 7000, headers };
+      const opts = { timeout: 3500, headers };
       // Accept self-signed certs for HTTPS (printers use them)
       if (protocol === 'https') {
         opts.rejectUnauthorized = false;
