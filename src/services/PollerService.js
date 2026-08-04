@@ -119,16 +119,19 @@ class PollerService {
         } else {
           // Detect source switch — SNMP lifetime counters vs Web period counters beda skala
           const prevSrc = dev.baseline_source || 'snmp';
-          if (prevSrc !== src) {
-            // Source changed — re-baseline agar delta tidak negatif gila
-            const deltaBw = (data.bw_counter || 0) - (dev.initial_bw || 0);
-            const deltaCol = (data.color_counter || 0) - (dev.initial_color || 0);
-            if (deltaBw < -1000 || deltaCol < -1000) {
-              console.log(`[Poller] ${dev.ip} source ${prevSrc}→${src}, re-baseline (delta was ${deltaBw}/${deltaCol})`);
-              dev.initial_bw = data.bw_counter || 0;
-              dev.initial_color = data.color_counter || 0;
-              dev.baseline_source = src;
-            }
+          const deltaBw = (data.bw_counter || 0) - (dev.initial_bw || 0);
+          const deltaCol = (data.color_counter || 0) - (dev.initial_color || 0);
+          const sourceChanged = prevSrc !== src;
+          // Re-baseline when: source changed AND delta went very negative, OR
+          // current counter dropped far below the stored baseline even with the
+          // same source (stale/wrong-scale baseline, e.g. web period counter that
+          // later became a lifetime counter). Prevents negative "Sejak Tracking".
+          const drifted = deltaBw < -1000 || deltaCol < -1000;
+          if (drifted) {
+            console.log(`[Poller] ${dev.ip} re-baseline (${sourceChanged ? 'source ' + prevSrc + '→' + src : 'drift'} delta was ${deltaBw}/${deltaCol})`);
+            dev.initial_bw = data.bw_counter || 0;
+            dev.initial_color = data.color_counter || 0;
+            dev.baseline_source = src;
           }
           dev.baseline_source = src;
         }
