@@ -740,33 +740,38 @@ app.registerView('dashboard', {
                           '<div class="text-[8px] text-gray-400 mb-1">' + (ud.source === 'ricoh_wim' ? 'Ricoh WIM' : ud.source === 'hp_usagepage' ? 'HP EWS' : ud.source === 'amcs_m1m4' ? 'AMCS M1-M4 (SNMP)' : ud.source) + '</div>' +
                           rows.map(r => cell(r.key)).join('') + scanHtml + '</div>';
                       }
-                      // Monthly delta: this month vs last month
+                      // Monthly delta: this month vs last month — per-function BW/Color detail
                       if (um && (um.this_month || um.prev_month)) {
                         const fmtD = (v) => { const n = v || 0; return (n > 0 ? '+' : '') + fmt(n); };
+                        const dCls = (d) => d > 0 ? 'text-red-500' : d < 0 ? 'text-green-600' : 'text-gray-400';
                         const rowDelta = (label, t, p) => {
                           const tb = (t && t.bw) || 0, tc = (t && t.color) || 0;
                           const pb = (p && p.bw) || 0, pc = (p && p.color) || 0;
                           const tTotal = tb + tc, pTotal = pb + pc;
                           const d = tTotal - pTotal;
-                          const dCls = d > 0 ? 'text-red-500' : d < 0 ? 'text-green-600' : 'text-gray-400';
-                          return '<div class="flex items-center justify-between py-1 text-[10px]">' +
+                          return '<div class="py-1.5 text-[10px] border-b border-slate-100 dark:border-slate-700 last:border-0">' +
+                            '<div class="flex items-center justify-between mb-0.5">' +
                             '<span class="font-medium text-gray-600 dark:text-gray-300">' + label + '</span>' +
                             '<span class="flex items-center gap-2"><span class="font-mono text-gray-500">' + fmt(tTotal) + '</span>' +
-                            '<span class="font-mono font-semibold ' + dCls + ' w-14 text-right">' + fmtD(d) + '</span></span></div>';
+                            '<span class="font-mono font-semibold ' + dCls(d) + ' w-12 text-right">' + fmtD(d) + '</span></span></div>' +
+                            '<div class="flex justify-end gap-3">' +
+                            '<span class="font-mono text-gray-400">BW: <b class="text-gray-600 dark:text-gray-300">' + fmt(tb) + '</b> <span class="text-green-600">' + fmtD(tb - pb) + '</span></span>' +
+                            '<span class="font-mono text-gray-400">Color: <b class="text-indigo-500">' + fmt(tc) + '</b> <span class="text-green-600">' + fmtD(tc - pc) + '</span></span>' +
+                            '</div></div>';
                         };
+                        const scanT = (um.this_month && um.this_month.scan && um.this_month.scan.count) || 0;
                         const scanD = (um.delta && um.delta.scan) ? um.delta.scan.count : 0;
-                        const scanCls = scanD > 0 ? 'text-red-500' : scanD < 0 ? 'text-green-600' : 'text-gray-400';
                         html += '<div class="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3 border border-slate-100">' +
                           '<div class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1 flex items-center justify-between">' +
                           '<span><i class="ph ph-calendar"></i> Pemakaian Bulanan</span>' +
-                          '<span class="text-[8px] font-normal text-gray-400">' + (um.bulan || '') + ' vs bulan lalu</span></div>' +
+                          '<span class="text-[8px] font-normal text-gray-400">' + (um.bulan || '') + ' vs bulan lalu &middot; per-fungsi</span></div>' +
                           rowDelta('Print', um.this_month.print, um.prev_month.print) +
                           rowDelta('Copy', um.this_month.copy, um.prev_month.copy) +
                           rowDelta('Fax', um.this_month.fax, um.prev_month.fax) +
                           '<div class="flex items-center justify-between py-1 text-[10px] border-t border-slate-100 dark:border-slate-700">' +
                           '<span class="font-medium text-gray-600 dark:text-gray-300">Scan</span>' +
-                          '<span class="flex items-center gap-2"><span class="font-mono text-gray-500">' + fmt((um.this_month.scan&&um.this_month.scan.count)||0) + '</span>' +
-                          '<span class="font-mono font-semibold ' + scanCls + ' w-14 text-right">' + fmtD(scanD) + '</span></span></div>' +
+                          '<span class="flex items-center gap-2"><span class="font-mono text-gray-500">' + fmt(scanT) + '</span>' +
+                          '<span class="font-mono font-semibold ' + dCls(scanD) + ' w-12 text-right">' + fmtD(scanD) + '</span></span></div>' +
                           '</div>';
                       }
                       // Activity history buttons — separated: Alert history vs Teknisi activity
